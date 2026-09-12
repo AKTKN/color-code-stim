@@ -1,3 +1,5 @@
+## (Proceeding) Soft-output integration.
+
 # color-code-stim
 Python package for simulating &amp; decoding 2D color code circuits via the [concatenated MWPM decoder](https://quantum-journal.org/papers/q-2025-01-27-1609).
 
