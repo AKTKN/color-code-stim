@@ -461,6 +461,10 @@ class ColorCode:
             if self._generate_dem:
                 self._dem_manager = DemManager(
                     circuit=self.circuit,
+                    swim_data_only=(self.circuit_type == "tri" and self.rounds == 1
+                        and not self.comparative_decoding and self.temp_bdry_type == "Z"
+                        and 0 < self.noise_model["bitflip"] < 0.5
+                        and all(v in (None, 0) for k,v in self.noise_model.items() if k != "bitflip")),
                     tanner_graph=self.tanner_graph,
                     circuit_type=self.circuit_type,
                     comparative_decoding=self.comparative_decoding,
@@ -897,6 +901,7 @@ class ColorCode:
         full_output: bool = False,
         check_validity: bool = False,
         verbose: bool = False,
+        compute_swim_distance: bool = False,
     ) -> np.ndarray | Tuple[np.ndarray, dict]:
         """
         Decode detector outcomes using concatenated MWPM decoding.
@@ -935,6 +940,12 @@ class ColorCode:
         verbose : bool, default False
             Whether to print additional information during decoding.
 
+        compute_swim_distance : bool, default False
+            Return fixed-color stage-2 swim proxies under full_output, using
+            the Phase-2A PyMatching fork. Only single-round data-only X noise
+            with triangular Z memory is validated. No full-decoder gap or
+            certified representative bound is asserted.
+
         Returns
         -------
         obs_preds : 1D or 2D numpy array of bool
@@ -945,6 +956,8 @@ class ColorCode:
         extra_outputs : dict, only when full_output is True
             Dictionary containing additional decoding outputs.
         """
+        if compute_swim_distance and bp_predecoding:
+            raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
         if bp_predecoding:
             return self.belief_concat_matching_decoder.decode(
@@ -961,6 +974,7 @@ class ColorCode:
 
         # Delegate to ConcatMatchingDecoder for standard decoding
         return self.concat_matching_decoder.decode(
+            compute_swim_distance=compute_swim_distance,
             detector_outcomes=detector_outcomes,
             colors=colors,
             logical_value=logical_value,

@@ -58,6 +58,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         dem_manager : DEMManager
             Manager providing access to decomposed DEMs and matrices
         """
+        self._swim_backends = {}
         self.dem_manager = dem_manager
         self.circuit_type = dem_manager.circuit_type
         self.num_obs = dem_manager.circuit.num_observables
@@ -82,6 +83,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         check_validity: bool = False,
         verbose: bool = False,
         custom_dem_data: Optional[Dict[str, Tuple[Tuple, Tuple]]] = None,
+        compute_swim_distance: bool = False,
         **kwargs,
     ) -> Union[np.ndarray, Tuple[np.ndarray, dict]]:
         """
@@ -122,6 +124,14 @@ class ConcatMatchingDecoder(BaseDecoder):
             If full_output is False: predicted observables as bool array.
             If full_output is True: tuple of (predictions, extra_outputs_dict).
         """
+        if compute_swim_distance:
+            if custom_dem_data is not None:
+                raise NotImplementedError("Swim output with custom_dem_data is not supported")
+            if erasure_matcher_predecoding or partial_correction_by_predecoding or self.comparative_decoding:
+                raise NotImplementedError("Swim output is not validated for predecoding or comparative DEMs")
+            if not self.dem_manager.swim_data_only:
+                raise NotImplementedError("Swim requires single-round triangular data-only X noise; unresolved boundaries are UNCLASSIFIED")
+
         if erasure_matcher_predecoding:
             if not self.comparative_decoding:
                 raise ValueError(
@@ -138,6 +148,17 @@ class ConcatMatchingDecoder(BaseDecoder):
             colors = ["r", "g", "b"]
         elif colors in ["r", "g", "b"]:
             colors = [colors]
+
+        if compute_swim_distance and detector_outcomes.shape[0] == 0:
+            result = np.empty((0,) if self.num_obs == 1 else (0,self.num_obs), dtype=bool)
+            extra = {"best_colors": np.empty(0,dtype=np.uint8), "weights": np.empty(0),
+                     "error_preds": np.empty((0,self.dem_manager.H.shape[1]),dtype=bool),
+                     "color_order": tuple(colors),
+                     "stage2_weights_by_color": np.empty((0,len(colors))),
+                     "swim_distances_by_color": np.empty((0,len(colors))),
+                     "selected_swim_distance": np.empty(0), "swim_bound_certified": False}
+            if check_validity: extra["validity"] = np.empty(0,dtype=bool)
+            return (result, extra) if full_output else result
 
         # Generate all logical value combinations for comparative decoding
         all_logical_values = np.array(
@@ -248,6 +269,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                 (num_logical_classes, len(colors), num_left_samples), dtype=float
             )
 
+            if compute_swim_distance:
+                swim_by_color = np.empty((num_left_samples,len(colors)))
             for i in range(len(error_preds_stage1_left)):
                 for i_c, c in enumerate(colors):
                     if verbose:
@@ -268,12 +291,19 @@ class ConcatMatchingDecoder(BaseDecoder):
                             custom_dem_data,
                         )
                     else:
-                        error_preds_new, weights_new = self._decode_stage2(
+                        stage2_result = self._decode_stage2(
                             detector_outcomes_left,
                             error_preds_stage1_left[i][c],
                             c,
                             custom_dem_data,
+                            compute_swim_distance=compute_swim_distance,
                         )
+                        if compute_swim_distance:
+                            error_preds_new = stage2_result.predictions
+                            weights_new = stage2_result.solution_weights
+                            swim_by_color[:,i_c] = stage2_result.swim_distances
+                        else:
+                            error_preds_new, weights_new = stage2_result
 
                     # Map errors back to original DEM ordering
                     error_preds_new = self.dem_manager.dems_decomposed[
@@ -419,6 +449,17 @@ class ConcatMatchingDecoder(BaseDecoder):
                 "error_preds": error_preds_final,
             }
 
+            if compute_swim_distance:
+                from ..soft_output.results import GROWTH_CONVENTION
+                extra_outputs.update(
+                    color_order=tuple(colors),
+                    stage2_weights_by_color=weights[0].T.copy(),
+                    swim_distances_by_color=swim_by_color,
+                    selected_swim_distance=swim_by_color[np.arange(num_left_samples),best_color_inds],
+                    swim_growth_convention=GROWTH_CONVENTION,
+                    swim_bound_certified=False,
+                )
+
             if len(error_preds_stage1_all) > 1:
                 extra_outputs["logical_gaps"] = logical_gaps
                 extra_outputs["logical_values"] = all_logical_values
@@ -490,7 +531,8 @@ class ConcatMatchingDecoder(BaseDecoder):
         preds_dem1: np.ndarray,
         color: COLOR_LABEL,
         custom_dem_data: Optional[Dict[str, Tuple[Tuple, Tuple]]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        *, compute_swim_distance: bool = False,
+    ):
         """
         Perform stage 2 decoding for a specific color.
 
@@ -511,6 +553,8 @@ class ConcatMatchingDecoder(BaseDecoder):
         tuple
             (error_predictions, weights) from stage 2 decoding
         """
+        if compute_swim_distance and custom_dem_data is not None:
+            raise NotImplementedError("Swim output with custom_dem_data is not supported")
         det_outcome_dem2 = detector_outcomes.copy()
 
         # Mask out detectors not belonging to this color
@@ -531,6 +575,14 @@ class ConcatMatchingDecoder(BaseDecoder):
                 self.dem_manager.dems_decomposed[color].Hs[1],
                 self.dem_manager.dems_decomposed[color].probs[1],
             )
+        if compute_swim_distance:
+            from ..soft_output.pymatching_backend import Stage2Backend
+            backend = self._swim_backends.get(color)
+            if backend is None or not backend.matches(self.dem_manager.dems_decomposed[color]):
+                backend = Stage2Backend(self.dem_manager,color)
+                self._swim_backends[color] = backend
+            return backend.decode(det_outcome_dem2)
+
         weights = np.log((1 - p) / p)
         matching = pymatching.Matching.from_check_matrix(H, weights=weights)
         preds, weights_new = matching.decode_batch(

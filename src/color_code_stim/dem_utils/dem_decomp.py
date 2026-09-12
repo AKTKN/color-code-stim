@@ -110,6 +110,8 @@ class DemDecomp:
         self.Hs = (H1, H2)
         self.probs = (prob1, prob2)
         self.obs_matrix_stage2 = obs_matrix_stage2
+        from ..soft_output.topology import decomposition_metadata
+        self.stage2_rows, self.stage2_edges = decomposition_metadata(self)
 
         # self._best_org_error_map = self._precompute_best_org_error_map()
 
@@ -155,6 +157,7 @@ class DemDecomp:
 
         num_org_error_sources = org_dem.num_errors
         num_detectors = org_dem.num_detectors
+        self._stage2_virtual_row_sources = {}
         org_dem_dets = org_dem[num_org_error_sources:]
         org_dem_errors = org_dem[:num_org_error_sources]
 
@@ -253,6 +256,8 @@ class DemDecomp:
                     dem1_virtual_obs_dict[dem1_det_ids] = virtual_obs
 
                 virtual_det_id = num_detectors + virtual_obs
+                self._stage2_virtual_row_sources[virtual_det_id] = (
+                    virtual_obs, tuple(sorted(dem1_det_ids)))
                 dem2_dets_sng.append(stim.target_relative_detector_id(virtual_det_id))
 
             # Add a virtual observable to dem2 for distinguishing error sources
