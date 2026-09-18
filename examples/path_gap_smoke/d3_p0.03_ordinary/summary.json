@@ -1,0 +1,46 @@
+{
+  "distance": 3,
+  "p": 0.03,
+  "seed": 20260918,
+  "shots_or_patterns": 128,
+  "exact": true,
+  "decoder_mode": "ordinary",
+  "rounds": 1,
+  "circuit_type": "tri",
+  "cnot_schedule": "tri_optimal",
+  "memory": "Z",
+  "qubit_ids": [
+    0,
+    1,
+    4,
+    7,
+    8,
+    9,
+    12
+  ],
+  "physical_errors_sha256": "34b42112527950606be8ec160ad9e09ac43705b835fd3cb135ece1681b0ed570",
+  "negative_phi_count": 0,
+  "negative_phi_probability": 0.0,
+  "retained_fraction": 0.9999999999999996,
+  "abort_fraction": 4.440892098500626e-16,
+  "conditional_failure": 0.016418097822240005,
+  "selected_patterns_or_shots": 128,
+  "ci_low": null,
+  "ci_high": null,
+  "timing_seconds": {
+    "code_setup": 0.008478865001961822,
+    "topology_and_mapping_setup": 0.0026796309975907207,
+    "topology_setup": 0.0015148009988479316,
+    "mapping_setup_and_circuit_audit": 0.001083834002201911,
+    "detector_and_decoder_setup": 0.01495237099879887,
+    "decoding": 0.003993633999925805,
+    "final_correction_mapping": 0.0001193329990201164,
+    "metric_evaluation": 0.011467958000139333
+  },
+  "exact_weighted_means": {
+    "delta_class": 9.094554126950031,
+    "delta_corr": 9.094554126950031,
+    "within_class_suboptimality": 0.0,
+    "optimal_class_gap": 9.094554126950031
+  }
+}
