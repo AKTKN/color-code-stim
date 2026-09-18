@@ -5,7 +5,8 @@ Implemented on `feature/final-correction-path-gap` from origin/main
 `05ccbe4a367a3e7fb91c9721b92cb270b314fd0c`. The smoke source includes the rate-plot
 scale adjustment in `c147e60`; its full SHA is saved in
 [`examples/path_gap_smoke/metadata.json`](../examples/path_gap_smoke/metadata.json).
-The later artifact/report commit does not alter the implementation.
+Later commits add the artifacts/report and normalize CSV line endings to LF;
+the metric, sampled shots and numerical data are unchanged.
 
 ## Public API and integration
 
