@@ -203,9 +203,10 @@ def plot_assessment(
     axes[0].set(
         xlabel="Abort fraction (whole score ties)",
         ylabel="Conditional logical failure",
-        ylim=(0, 1),
     )
-    axes[1].set(xlabel="Score", ylabel="Conditional logical failure", ylim=(0, 1))
+    axes[1].set(xlabel="Score", ylabel="Conditional logical failure")
+    axes[0].set_ylim(bottom=0)
+    axes[1].set_ylim(bottom=0)
     axes[2].set(xlabel="Score", ylabel="Probability mass")
     fig.suptitle(title)
     fig.tight_layout()
