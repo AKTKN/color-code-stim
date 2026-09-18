@@ -6,6 +6,11 @@ Python package for simulating &amp; decoding 2D color code circuits via the [con
 **Note**: _See also [ConcatMatching](https://github.com/seokhyung-lee/ConcatMatching) if you want to input your check matrix directly to the decoder instead of using pre-defined color code circuits._
 
 ## Features
+
+- **Final-correction monochromatic path gap:** an optional, decoder-independent
+  soft-output heuristic for single-round triangular bit-flip noise. See the
+  [API, physical ordering contract and evaluation guide](docs/monochromatic_path_gap.md).
+
 - **Simulation of 2D color code circuits using [Stim](https://github.com/quantumlib/Stim) library.** <br> 
 It currently supports the following circuit types: 
   * `circuit_type="tri"`: Memory experiment of a triangular patch with distance `d` (odd).
