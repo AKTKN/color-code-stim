@@ -13,7 +13,7 @@ import pymatching
 
 from .base import BaseDecoder
 from .color_correlated_decoding import (
-    ColorCorrelatedPriorReweighter, candidate_specs, guide_union,
+    ColorCorrelatedPriorReweighter, align_stage2_to_base, candidate_specs, guide_union,
 )
 from ..config import COLOR_LABEL, color_to_color_val
 from ..dem_utils.dem_manager import DemManager
@@ -56,6 +56,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         self,
         dem_manager: DemManager,
         enable_colorcorrelated_decoding: bool = False,
+        color_correlated_weight_basis: str = "stage2",
     ):
         """
         Initialize the concatenated matching decoder.
@@ -75,6 +76,9 @@ class ConcatMatchingDecoder(BaseDecoder):
         self.num_obs = dem_manager.circuit.num_observables
         self.comparative_decoding = dem_manager.comparative_decoding
         self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
+        if color_correlated_weight_basis not in ("stage2", "original_dem"):
+            raise ValueError("color_correlated_weight_basis must be 'stage2' or 'original_dem'")
+        self.color_correlated_weight_basis = color_correlated_weight_basis
 
     def supports_comparative_decoding(self) -> bool:
         """Return True - this decoder supports comparative decoding."""
@@ -293,6 +297,13 @@ class ConcatMatchingDecoder(BaseDecoder):
             generation_weights = np.full_like(candidate_weights, np.nan)
             best_candidate_indices = np.full(num_left_samples, -1, dtype=int)
             native_candidate_preds = [[None] * 12 for _ in range(num_logical_classes)]
+            original_llr = None
+            if self.color_correlated_weight_basis == "original_dem":
+                original_p = np.asarray(self.dem_manager.probs_xz, dtype=float)
+                if (np.any(original_p <= 0) or np.any(original_p >= 1)
+                        or not np.isfinite(original_p).all()):
+                    raise ValueError("original DEM probabilities must be finite and in (0, 1)")
+                original_llr = np.log((1 - original_p) / original_p)
 
         if num_left_samples > 0 and not (
             erasure_matcher_predecoding and partial_correction_by_predecoding
@@ -350,12 +361,15 @@ class ConcatMatchingDecoder(BaseDecoder):
                         base_p = self.dem_manager.dems_decomposed[c].probs[1]
                         base_llr = np.log((1 - base_p) / base_p)
                         generation_weights[i, i_c] = weights_new
-                        weights_new = error_preds_new.astype(float) @ base_llr
+                        if original_llr is None:
+                            weights_new = error_preds_new.astype(float) @ base_llr
 
                     # Map errors back to original DEM ordering
                     error_preds_new = self.dem_manager.dems_decomposed[
                         c
                     ].map_errors_to_org_dem(error_preds_new, stage=2)
+                    if self.enable_colorcorrelated_decoding and original_llr is not None:
+                        weights_new = error_preds_new.astype(float) @ original_llr
 
                     error_preds[i, i_c, :, :] = error_preds_new
                     weights[i, i_c, :] = weights_new
@@ -373,9 +387,12 @@ class ConcatMatchingDecoder(BaseDecoder):
                                 {name: correction[shot] for name, correction in guides.items()},
                                 spec.guide_colors,
                             )
-                            p1, p2 = reweighter.probabilities(c, guide)
                             decomp = self.dem_manager.dems_decomposed[c]
-                            temporary_dem = {c: ((decomp.Hs[0], p1), (decomp.Hs[1], p2))}
+                            reweighted = reweighter.decomposition(c, guide)
+                            temporary_dem = {c: (
+                                (reweighted.Hs[0], reweighted.probs[0]),
+                                (reweighted.Hs[1], reweighted.probs[1]),
+                            )}
                             det = detector_outcomes_left[shot:shot + 1].copy()
                             if self.comparative_decoding:
                                 det[:, -self.num_obs:] = (
@@ -386,16 +403,22 @@ class ConcatMatchingDecoder(BaseDecoder):
                             native, generation_weight = self._decode_stage2(
                                 det, stage1, c, temporary_dem
                             )
+                            mapped, base_native = align_stage2_to_base(
+                                native[0], reweighted, decomp
+                            )
                             if native_candidate_preds[i][i_spec] is None:
                                 native_candidate_preds[i][i_spec] = np.empty(
-                                    (num_left_samples, native.shape[1]), dtype=native.dtype
+                                    (num_left_samples, base_native.shape[0]), dtype=bool
                                 )
-                            native_candidate_preds[i][i_spec][shot] = native[0]
-                            error_preds[i, i_spec, shot] = decomp.map_errors_to_org_dem(
-                                native[0], stage=2
-                            )
+                            native_candidate_preds[i][i_spec][shot] = base_native
+                            error_preds[i, i_spec, shot] = mapped
                             generation_weights[i, i_spec, shot] = generation_weight[0]
-                            weights[i, i_spec, shot] = native[0].astype(float) @ base_llr
+                            if original_llr is None:
+                                weights[i, i_spec, shot] = base_native.astype(float) @ base_llr
+                            else:
+                                weights[i, i_spec, shot] = (
+                                    error_preds[i, i_spec, shot].astype(float) @ original_llr
+                                )
 
             if self.enable_colorcorrelated_decoding:
                 candidate_weights = weights.copy()
@@ -567,6 +590,7 @@ class ConcatMatchingDecoder(BaseDecoder):
                     candidate_target_colors=tuple(spec.target_color for spec in specs),
                     best_candidate_indices=best_candidate_indices,
                     candidate_weights=candidate_weights,
+                    candidate_weight_basis=self.color_correlated_weight_basis,
                     candidate_generation_weights=generation_weights,
                     candidate_native_stage2_preds=native_candidate_preds,
                 )

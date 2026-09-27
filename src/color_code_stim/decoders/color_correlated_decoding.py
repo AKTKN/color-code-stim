@@ -1,13 +1,17 @@
-"""Source-provenance priors for color-correlated concatenated matching.
+"""Original-DEM conditioning for color-guided concatenated matching.
 
-Guide corrections are Boolean sets of *original* DEM mechanisms. Reweighting
-changes only candidate generation; candidates must be compared using the
-unmodified stage-2 prior of the decode call.
+Guide corrections identify mechanisms of the pre-decomposition X/Z DEM. For
+candidate generation, condition those Bernoulli mechanisms on being active,
+rebuild that DEM, then decompose it for the target color. Candidate selection
+always uses an unmodified base prior.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
+import stim
+
+from ..dem_utils.dem_decomp import DemDecomp
 
 
 COLORS = ("r", "g", "b")
@@ -43,60 +47,67 @@ def guide_union(baseline_corrections: dict[str, np.ndarray],
     return np.logical_or.reduce([baseline_corrections[c] for c in guide_colors])
 
 
-class ColorCorrelatedPriorReweighter:
-    """Cache aligned source sets and construct temporary stage-1/2 priors.
+def align_stage2_to_base(native: np.ndarray, temporary: DemDecomp,
+                         base: DemDecomp) -> tuple[np.ndarray, np.ndarray]:
+    """Map a rebuilt stage-2 correction to original and base-stage-2 order."""
+    temporary_map = temporary.error_map_matrices[1].tocsr()
+    base_map = base.error_map_matrices[1].tocsr()
+    if (not np.all(np.diff(temporary_map.indptr) == 1)
+            or not np.all(np.diff(base_map.indptr) == 1)
+            or set(temporary_map.indices) != set(base_map.indices)):
+        raise NotImplementedError("Reweighted stage-2 source set differs from base DEM")
+    mapped = np.asarray(temporary.map_errors_to_org_dem(native, stage=2), dtype=bool)
+    base_native = mapped[..., base_map.indices]
+    return mapped, base_native
 
-    The conditional rule requires unit symbolic multipliers. A decomposition
-    that splits a source among multiple terms is rejected explicitly.
+
+class ColorCorrelatedPriorReweighter:
+    """Rebuild target-color decompositions after conditioning original sources.
+
+    A selected guide source has conditional Bernoulli probability one. It is
+    clipped just below one so the downstream matching weights remain finite.
+    The unselected original source probabilities are unchanged.
     """
 
     def __init__(self, dem_manager):
-        self._sources = {}
-        self._base = {}
-        self._org_prob = {}
+        self._manager = dem_manager
+        self._base_dem = dem_manager.dem_xz.flattened()
+        self._base_q = np.asarray(dem_manager.probs_xz, dtype=float).copy()
+        if sum(inst.type == "error" for inst in self._base_dem) != len(self._base_q):
+            raise ValueError("original DEM source probabilities are misaligned")
         for color in COLORS:
             decomp = dem_manager.dems_decomposed[color]
-            q = np.asarray(decomp.org_prob, dtype=float)
-            self._org_prob[color] = q
-            for stage in (0, 1):
-                symbolic = decomp.dems_symbolic[stage]
-                for em in symbolic:
-                    if not np.all(np.asarray(em.prob_muls) == 1):
-                        raise NotImplementedError(
-                            "Color-correlated decoding requires unit prob_muls "
-                            f"(color={color}, stage={stage + 1})"
-                        )
-                mapping = decomp.error_map_matrices[stage].tocsr()
-                base = np.asarray(decomp.probs[stage], dtype=float)
-                if mapping.shape != (len(base), len(q)):
-                    raise ValueError("Decomposition provenance is not aligned with H columns")
-                sources = tuple(mapping.indices[mapping.indptr[j]:mapping.indptr[j + 1]]
-                                for j in range(mapping.shape[0]))
-                marginal = np.array([
-                    (1 - np.prod(1 - 2 * q[indices])) / 2 for indices in sources
-                ])
-                if not np.allclose(marginal, base, rtol=1e-9, atol=1e-12):
-                    raise NotImplementedError(
-                        "Color-correlated decoding requires unit-multiplicity "
-                        f"provenance consistent with the base prior ({color}, stage {stage + 1})"
-                    )
-                self._sources[color, stage] = sources
-                self._base[color, stage] = base
+            if not np.array_equal(decomp.org_prob, self._base_q):
+                raise ValueError("color decomposition has different original DEM source ordering")
 
-    def probabilities(self, color: str, guide_sources: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return independent temporary priors for both stages for one guide set."""
+    def source_probabilities(self, guide_sources: np.ndarray) -> np.ndarray:
+        """Return the conditioned original-DEM source probabilities."""
         guide_sources = np.asarray(guide_sources, dtype=bool)
-        if guide_sources.shape != self._org_prob[color].shape:
+        if guide_sources.shape != self._base_q.shape:
             raise ValueError("Guide must be in original DEM mechanism ordering")
-        q = self._org_prob[color]
-        result = []
-        for stage in (0, 1):
-            updated = self._base[color, stage].copy()
-            for column, sources in enumerate(self._sources[color, stage]):
-                for source in sources:
-                    if guide_sources[source]:
-                        other = sources[sources != source]
-                        conditional = (1 + np.prod(1 - 2 * q[other])) / 2
-                        updated[column] = max(updated[column], conditional)
-            result.append(np.clip(updated, MATCHING_EPS, 1 - MATCHING_EPS))
-        return result[0], result[1]
+        updated = self._base_q.copy()
+        updated[guide_sources] = 1 - MATCHING_EPS
+        return updated
+
+    def reweighted_dem(self, guide_sources: np.ndarray) -> stim.DetectorErrorModel:
+        """Replace only error probabilities, preserving source and detector order."""
+        updated = self.source_probabilities(guide_sources)
+        dem = stim.DetectorErrorModel()
+        source = 0
+        for inst in self._base_dem:
+            if inst.type == "error":
+                dem.append("error", float(updated[source]), inst.targets_copy())
+                source += 1
+            else:
+                dem.append(inst)
+        return dem
+
+    def decomposition(self, color: str, guide_sources: np.ndarray) -> DemDecomp:
+        """Re-decompose the reweighted original DEM for one target color."""
+        if color not in COLORS:
+            raise ValueError(f"Unknown target color: {color}")
+        return DemDecomp(
+            org_dem=self.reweighted_dem(guide_sources),
+            color=color,
+            remove_non_edge_like_errors=self._manager.remove_non_edge_like_errors,
+        )

@@ -35,12 +35,31 @@ predictions, details = code.decode(detector_outcomes, full_output=True)
 ```
 
 Each target color is decoded again using either other color as a guide, then
-their Boolean OR as a guide. Both matching stages use temporary reweighted
-priors. All twelve candidates are compared using the original stage-2 prior,
+their Boolean OR as a guide. For each extra candidate, the guide's original
+X/Z DEM mechanisms are conditioned on being active (probability `1-1e-14`);
+the modified original DEM is decomposed again for that target color and both
+matching stages are rerun. All twelve candidates are compared using the
+unmodified stage-2 prior,
 since their generation weights come from different priors. `details` includes
 `candidate_labels`, `candidate_weights`, `best_candidate_indices`, the selected
 `weights`, `best_colors`, and original-DEM `error_preds`. Comparative decoding
 computes its logical gap from each class's minimum over twelve candidates.
+
+Set `color_correlated_weight_basis="original_dem"` to compare all twelve
+candidates after mapping their stage-2 corrections to the pre-decomposition
+X/Z DEM (`dem_xz`). The score is the sum of original DEM log-odds weights
+`log((1-q)/q)` for the mapped mechanisms. This basis is used for candidate
+selection, `weights`, and comparative logical gaps. For the standard
+decomposition, stage-2 columns each map to one original DEM mechanism, so
+this score agrees with the default stage-2 score up to floating-point error.
+It does not change the matching
+priors used to generate candidates. `candidate_weight_basis` in `details`
+records the selected basis. The default remains `"stage2"`; neither score is
+a full posterior probability of a logical class.
+
+The guide reweighting defines a temporary probability vector on the original
+X/Z DEM. It conditions all guide mechanisms simultaneously, then rebuilds
+the target-color decomposition. The base DEM remains unchanged.
 
 This option requires all three colors and unit-multiplicity source provenance.
 It currently cannot be combined with BP/custom DEM priors or matching-growth

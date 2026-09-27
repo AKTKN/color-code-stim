@@ -1,75 +1,58 @@
 """Checks for source-guided candidates and common-prior selection."""
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
-from scipy.sparse import csr_matrix
 
 from color_code_stim import ColorCode
 from color_code_stim.decoders.color_correlated_decoding import (
     ColorCorrelatedPriorReweighter, candidate_specs, guide_union,
 )
 from color_code_stim.noise_model import NoiseModel
+from color_code_stim.stim_utils import dem_to_parity_check
 
 
-def code(*, comparative=False, enabled=True):
+def code(*, comparative=False, enabled=True, weight_basis="stage2"):
     return ColorCode(
         d=3, rounds=1, circuit_type="tri", cnot_schedule="tri_optimal",
         noise_model=NoiseModel(bitflip=.05), comparative_decoding=comparative,
         enable_colorcorrelated_decoding=enabled,
+        color_correlated_weight_basis=weight_basis,
     )
 
 
-def synthetic_reweighter(q=(.1, .2, .3), rows=((0,), (0, 1), (0, 1, 2), (2,))):
-    q = np.asarray(q)
-    matrix = np.zeros((len(rows), len(q)), dtype=bool)
-    for i, row in enumerate(rows):
-        matrix[i, list(row)] = True
-    base = np.array([(1 - np.prod(1 - 2 * q[list(row)])) / 2 for row in rows])
-    symbolic = [SimpleNamespace(prob_muls=np.ones(len(row))) for row in rows]
-    decomp = SimpleNamespace(
-        org_prob=q, probs=(base, base),
-        error_map_matrices=(csr_matrix(matrix), csr_matrix(matrix)),
-        dems_symbolic=(symbolic, symbolic),
-    )
-    return ColorCorrelatedPriorReweighter(
-        SimpleNamespace(dems_decomposed={c: decomp for c in "rgb"})
-    )
+def test_reweighted_original_dem_is_redecomposed_for_target_color():
+    cc = code()
+    manager = cc.dem_manager
+    rw = ColorCorrelatedPriorReweighter(manager)
+    base = manager.dems_decomposed["r"]
+    mapping = base.error_map_matrices[0].tocsr()
+    row = next(i for i, n in enumerate(np.diff(mapping.indptr)) if n >= 2)
+    sources = mapping.indices[mapping.indptr[row]:mapping.indptr[row + 1]]
+    guide = np.zeros(len(manager.probs_xz), dtype=bool)
+    guide[sources[:2]] = True
+    updated = rw.source_probabilities(guide)
+    np.testing.assert_array_equal(updated[~guide], manager.probs_xz[~guide])
+    np.testing.assert_allclose(updated[guide], 1 - 1e-14)
+    _, _, dem_prob = dem_to_parity_check(rw.reweighted_dem(guide))
+    np.testing.assert_array_equal(dem_prob, updated)
+    rebuilt = rw.decomposition("r", guide)
+    np.testing.assert_array_equal(rebuilt.org_prob, updated)
+    expected = (1 - np.prod(1 - 2 * updated[sources])) / 2
+    assert rebuilt.probs[0][row] == pytest.approx(expected)
+    assert rebuilt.probs[0][row] != pytest.approx(base.probs[0][row])
+    np.testing.assert_array_equal(base.org_prob, manager.probs_xz)
 
 
-def test_reweighting_formula_and_or_guide():
-    rw = synthetic_reweighter()
-    guide = np.array([True, True, False])
-    p1, p2 = rw.probabilities("r", guide)
-    np.testing.assert_array_equal(p1, p2)
-    assert p1[0] == pytest.approx(1 - 1e-14)
-    assert p1[3] == pytest.approx(.3)  # disjoint source
-    assert p1[1] == pytest.approx(.9)  # max(.8 conditional on 0, .9 on 1)
-    # Enumerate independent Bernoulli sources conditional on source 0 active.
-    probability = 0.
-    for x1 in (0, 1):
-        for x2 in (0, 1):
-            probability += (x1 + x2 + 1) % 2 * (.2 if x1 else .8) * (.3 if x2 else .7)
-    assert rw.probabilities("r", np.array([True, False, False]))[0][2] == pytest.approx(probability)
-
+def test_guide_union_and_source_validation():
     specs = candidate_specs()
     assert len(specs) == 12
     assert tuple(s.target_color for s in specs) == tuple("rgb") + tuple("rrrgggbbb")
     corrections = {"g": np.array([1, 1, 0], dtype=bool),
                    "b": np.array([1, 0, 1], dtype=bool)}
     np.testing.assert_array_equal(guide_union(corrections, ("g", "b")), [1, 1, 1])
-
-
-def test_reject_nonunit_multiplier():
-    q = np.array([.1])
-    decomp = SimpleNamespace(
-        org_prob=q, probs=(q, q),
-        error_map_matrices=(csr_matrix([[1]]), csr_matrix([[1]])),
-        dems_symbolic=([SimpleNamespace(prob_muls=np.array([.5]))],) * 2,
-    )
-    with pytest.raises(NotImplementedError, match="prob_muls"):
-        ColorCorrelatedPriorReweighter(SimpleNamespace(dems_decomposed={c: decomp for c in "rgb"}))
+    rw = ColorCorrelatedPriorReweighter(code().dem_manager)
+    with pytest.raises(ValueError, match="Guide must"):
+        rw.source_probabilities(np.array([True]))
 
 
 @pytest.mark.parametrize("comparative", [False, True])
@@ -128,6 +111,25 @@ def test_selection_ignores_generation_weights(monkeypatch):
     np.testing.assert_allclose(out["weights"], out["candidate_weights"].min(axis=(0, 1)))
     assert np.any(out["candidate_weights"].argmin(axis=1) !=
                   out["candidate_generation_weights"].argmin(axis=1))
+
+
+@pytest.mark.parametrize("comparative", [False, True])
+def test_original_dem_basis_scores_mapped_corrections(comparative):
+    cc = code(comparative=comparative, weight_basis="original_dem")
+    shots, _ = cc.sample(12, seed=227)
+    _, out = cc.decode(shots, full_output=True)
+    assert out["candidate_weight_basis"] == "original_dem"
+    q = cc.dem_manager.probs_xz
+    llr = np.log((1 - q) / q)
+    for cls, natives in enumerate(out["candidate_native_stage2_preds"]):
+        for j, native in enumerate(natives):
+            decomp = cc.dems_decomposed[out["candidate_target_colors"][j]]
+            mapped = decomp.map_errors_to_org_dem(native, stage=2)
+            np.testing.assert_allclose(out["candidate_weights"][cls, j], mapped @ llr)
+    np.testing.assert_allclose(out["weights"], out["candidate_weights"].min(axis=(0, 1)))
+    if comparative:
+        minima = out["candidate_weights"].min(axis=1)
+        np.testing.assert_allclose(out["logical_gaps"], np.abs(minima[0] - minima[1]))
 
 
 def test_unsupported_options_and_colorcode_persistence(tmp_path):

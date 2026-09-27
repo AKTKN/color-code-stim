@@ -102,6 +102,7 @@ class ColorCode:
         perfect_first_syndrome_extraction: bool = False,
         comparative_decoding: bool = False,
         enable_colorcorrelated_decoding: bool = False,
+        color_correlated_weight_basis: Literal["stage2", "original_dem"] = "stage2",
         exclude_non_essential_pauli_detectors: bool = False,
         cultivation_circuit: Optional[stim.Circuit] = None,
         remove_non_edge_like_errors: bool = True,
@@ -222,6 +223,10 @@ class ColorCode:
             among all twelve using the original monochromatic stage-2 prior.
             Requires all three colors and is incompatible with BP predecoding
             and matching-growth swim output.
+        color_correlated_weight_basis : {'stage2', 'original_dem'}, default 'stage2'
+            Candidate selection weight when color-correlated decoding is enabled.
+            'original_dem' scores mapped stage-2 corrections with the unchanged
+            probabilities of the pre-decomposition X/Z DEM.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -397,6 +402,9 @@ class ColorCode:
 
         self.comparative_decoding = comparative_decoding
         self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
+        if color_correlated_weight_basis not in ("stage2", "original_dem"):
+            raise ValueError("color_correlated_weight_basis must be 'stage2' or 'original_dem'")
+        self.color_correlated_weight_basis = color_correlated_weight_basis
 
         self.exclude_non_essential_pauli_detectors = (
             exclude_non_essential_pauli_detectors
@@ -537,6 +545,7 @@ class ColorCode:
             self._concat_matching_decoder = ConcatMatchingDecoder(
                 dem_manager=self.dem_manager,
                 enable_colorcorrelated_decoding=self.enable_colorcorrelated_decoding,
+                color_correlated_weight_basis=self.color_correlated_weight_basis,
             )
         return self._concat_matching_decoder
 
@@ -1273,6 +1282,9 @@ class ColorCode:
         instance.__dict__.update(data)
         instance.enable_colorcorrelated_decoding = data.get(
             "enable_colorcorrelated_decoding", False
+        )
+        instance.color_correlated_weight_basis = data.get(
+            "color_correlated_weight_basis", "stage2"
         )
 
         # Reconstruct non-picklable attributes in the correct order
