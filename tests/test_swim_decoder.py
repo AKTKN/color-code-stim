@@ -24,6 +24,18 @@ def test_frozen_baseline():
         np.testing.assert_array_equal(pred != fixture['actual_observable'],fixture['failures'])
 
 
+def test_original_dem_selection_keeps_swim_stage2_weight_diagnostic():
+    cc = code(color_correlated_weight_basis='original_dem')
+    shots, _ = cc.sample(8, seed=41)
+    _, out = cc.decode(shots, full_output=True, compute_swim_distance=True)
+    decoder = cc.concat_matching_decoder
+    for i, color in enumerate(out['color_order']):
+        stage1 = decoder._decode_stage1(shots, color)
+        stage2 = decoder._decode_stage2(shots, stage1, color, compute_swim_distance=True)
+        np.testing.assert_array_equal(out['stage2_weights_by_color'][:, i],
+                                      stage2.solution_weights)
+
+
 @pytest.mark.parametrize('d', [3,5,7])
 @pytest.mark.parametrize('colors', ['all','g',['b','r']])
 def test_regression_shapes_direct_backend_and_cache(d,colors):

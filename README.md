@@ -37,11 +37,11 @@ predictions, details = code.decode(detector_outcomes, full_output=True)
 When all ordinary corrections differ, each target color is decoded again using
 either other color as a guide, then their Boolean OR as a guide. For each extra
 candidate, the guide's original
-X/Z DEM mechanisms are conditioned on being active (probability `1-1e-14`);
-the modified original DEM is decomposed again for that target color and both
-matching stages are rerun. All represented candidates are compared using an
-unmodified common prior (the ordinary stage-2 prior by default),
-since their generation weights come from different priors. `details` includes
+X/Z DEM mechanisms receive prior `q**(1/color_correlated_b)` for stage 1.
+The original symbolic source map supplies those stage-1 probabilities without
+rebuilding the DEM. Stage 2 is rerun with the unchanged original matrix and
+prior. All candidates are compared using the unchanged original X/Z DEM
+log-odds. `details` includes
 `candidate_labels`, `candidate_weights`, `best_candidate_indices`, the selected
 `weights`, `best_colors`, and original-DEM `error_preds`. Comparative decoding
 computes its logical gap from each class's minimum over twelve candidates.
@@ -59,21 +59,46 @@ category belongs to the selected logical class. Erasure-predecoded shots,
 which have no ordinary three-candidate comparison, report `-1` in this
 decoder diagnostic and are not supported by the YAML metric writer.
 
-Set `color_correlated_weight_basis="original_dem"` to compare all twelve
+Color-correlated decoding requires `color_correlated_weight_basis="original_dem"`
+(its default) to compare all twelve
 candidates after mapping their stage-2 corrections to the pre-decomposition
 X/Z DEM (`dem_xz`). The score is the sum of original DEM log-odds weights
 `log((1-q)/q)` for the mapped mechanisms. This basis is used for candidate
 selection, `weights`, and comparative logical gaps. For the standard
 decomposition, stage-2 columns each map to one original DEM mechanism, so
-this score agrees with the default stage-2 score up to floating-point error.
-It does not change the matching
-priors used to generate candidates. `candidate_weight_basis` in `details`
-records the selected basis. The default remains `"stage2"`; neither score is
+this score agrees with the stage-2 score up to floating-point error.
+`candidate_weight_basis` in `details` records the selected basis. The default
+for other modes remains `"stage2"`; neither score is
 a full posterior probability of a logical class.
 
-The guide reweighting defines a temporary probability vector on the original
-X/Z DEM. It conditions all guide mechanisms simultaneously, then rebuilds
-the target-color decomposition. The base DEM remains unchanged.
+The same option also applies to ordinary concatenated matching: it compares
+the three ordinary color corrections using their mapped original X/Z DEM
+weights. The default `"stage2"` keeps the historical matching-weight choice.
+Both stage-1 and stage-2 matchings are unchanged by this selection option.
+
+Guide reweighting changes only the stage-1 priors. The base DEM, stage-2
+priors, and candidate-scoring prior remain unchanged. Symbolic source maps,
+stage-2 matchers, and a bounded cache of stage-1 priors and matchers avoid
+repeated per-shot setup.
+
+### Advanced candidate budgets
+
+These three advanced modes are mutually exclusive. Ordinary concatenated
+matching has three candidates and six MWPM calls per logical class.
+Cross-color relifting (`enable_cross_color_relifting=True`) retains 12 canonical
+logical candidate slots and has a maximum of 15 calls per class; equality of
+mapped baseline corrections and duplicate target Stage-2 syndromes dynamically
+prune actual calls. It requires `remove_non_edge_like_errors=False` and a
+graphlike full decomposition. The X/Z-DEM perturbation ensemble
+(`enable_prior_perturbation=True`, `perturbation_ensemble_size=M`) has `3*M`
+candidates and `6*M` calls per class. Color-correlated decoding retains 12
+slots: its baseline requires six calls, with zero, three, or nine guided
+reruns for baseline equality classes 0, 1, or 2 respectively (six, twelve,
+or 24 total calls). The `relift_run` and `color_correlated_run` values classify
+baseline solution multiplicity in original X/Z DEM order, not actual runtime.
+Both use the same exact equality rule and the first equal representative in
+`r,g,b` order. Selection always uses `candidate_weight_basis`; generation
+weights are diagnostics.
 
 This option requires all three colors and unit-multiplicity source provenance.
 It currently cannot be combined with BP/custom DEM priors or matching-growth

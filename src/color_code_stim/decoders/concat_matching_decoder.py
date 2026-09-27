@@ -7,18 +7,40 @@ supporting comparative decoding and advanced pre-decoding strategies.
 """
 
 import itertools
+from collections import OrderedDict
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pymatching
 
 from .base import BaseDecoder
 from .color_correlated_decoding import (
-    ColorCorrelatedPriorReweighter, align_stage2_to_base, candidate_schedule,
+    CandidateEvaluator, ColorCorrelatedPriorReweighter, candidate_schedule,
     candidate_specs, guide_union,
 )
+from . import cross_color_relifting as relift
+from .prior_perturbation import PriorPerturbationEnsemble
 from ..config import COLOR_LABEL, color_to_color_val
 from ..dem_utils.dem_manager import DemManager
 from ..utils import _get_final_predictions
+
+
+def _ordinary_baseline_predictions(mapped, generation_weights, manager,
+                                   logical_classes, comparative_decoding, num_obs):
+    """Select the already solved ordinary r/g/b candidates by native MWPM weight."""
+    shots = mapped.shape[2]
+    if not shots:
+        return np.zeros((0,) if num_obs == 1 else (0, num_obs), dtype=bool)
+    baseline_class, baseline_color, _, _ = _get_final_predictions(
+        generation_weights[:, :3, :]
+    )
+    if comparative_decoding:
+        observed = np.asarray([logical_classes[i] for i in baseline_class], dtype=bool)
+    else:
+        selected = mapped[baseline_class, baseline_color, np.arange(shots)]
+        observed = np.asarray(
+            (selected.astype(np.uint8) @ manager.obs_matrix.T) % 2, dtype=bool
+        )
+    return observed.ravel() if num_obs == 1 else observed
 
 
 class ConcatMatchingDecoder(BaseDecoder):
@@ -57,7 +79,13 @@ class ConcatMatchingDecoder(BaseDecoder):
         self,
         dem_manager: DemManager,
         enable_colorcorrelated_decoding: bool = False,
-        color_correlated_weight_basis: str = "stage2",
+        color_correlated_weight_basis: str | None = None,
+        color_correlated_b: float = 1.0,
+        enable_cross_color_relifting: bool = False,
+        enable_prior_perturbation: bool = False,
+        perturbation_ensemble_size: int = 1,
+        perturbation_alpha: float = 0.0,
+        perturbation_seed: int | None = None,
     ):
         """
         Initialize the concatenated matching decoder.
@@ -77,8 +105,35 @@ class ConcatMatchingDecoder(BaseDecoder):
         self.num_obs = dem_manager.circuit.num_observables
         self.comparative_decoding = dem_manager.comparative_decoding
         self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
+        if type(color_correlated_b) not in (int, float) or not np.isfinite(color_correlated_b) or color_correlated_b <= 0:
+            raise ValueError("color_correlated_b must be positive and finite")
+        self.color_correlated_b = float(color_correlated_b)
+        self._color_correlated_reweighter = None
+        self._color_correlated_stage1_matchings = OrderedDict()
+        self._color_correlated_stage2_matchings = {}
+        self._candidate_evaluators = {}
+        self.enable_cross_color_relifting = enable_cross_color_relifting
+        self.enable_prior_perturbation = enable_prior_perturbation
+        if not isinstance(perturbation_ensemble_size, int) or perturbation_ensemble_size < 1:
+            raise ValueError("perturbation_ensemble_size must be >= 1")
+        if not np.isfinite(perturbation_alpha) or not 0 <= perturbation_alpha <= 1:
+            raise ValueError("perturbation_alpha must be between 0 and 1")
+        self.perturbation_ensemble_size = perturbation_ensemble_size
+        self.perturbation_alpha = perturbation_alpha
+        self.perturbation_seed = perturbation_seed
+        if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
+            raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
+        self._perturbation_ensemble = None
+        if enable_cross_color_relifting and enable_colorcorrelated_decoding:
+            raise NotImplementedError("Cross-color relifting and color-correlated decoding cannot be combined")
+        if enable_cross_color_relifting and dem_manager.remove_non_edge_like_errors:
+            raise NotImplementedError("Cross-color relifting requires remove_non_edge_like_errors=False")
+        if color_correlated_weight_basis is None:
+            color_correlated_weight_basis = "original_dem" if enable_colorcorrelated_decoding else "stage2"
         if color_correlated_weight_basis not in ("stage2", "original_dem"):
             raise ValueError("color_correlated_weight_basis must be 'stage2' or 'original_dem'")
+        if enable_colorcorrelated_decoding and color_correlated_weight_basis != "original_dem":
+            raise ValueError("color-correlated decoding requires original_dem selection basis")
         self.color_correlated_weight_basis = color_correlated_weight_basis
 
     def supports_comparative_decoding(self) -> bool:
@@ -144,6 +199,30 @@ class ConcatMatchingDecoder(BaseDecoder):
             If full_output is False: predicted observables as bool array.
             If full_output is True: tuple of (predictions, extra_outputs_dict).
         """
+        if self.enable_prior_perturbation:
+            if custom_dem_data is not None:
+                raise NotImplementedError("Prior perturbation with BP/custom DEM priors is unsupported")
+            if compute_swim_distance:
+                raise NotImplementedError("Prior perturbation with matching-growth swim output is unsupported")
+            if erasure_matcher_predecoding or partial_correction_by_predecoding:
+                raise NotImplementedError("Prior perturbation with erasure predecoding is unsupported")
+            return self._decode_prior_perturbation(
+                detector_outcomes, colors, logical_value, full_output, check_validity
+            )
+        if self.enable_cross_color_relifting:
+            if self.dem_manager.remove_non_edge_like_errors:
+                raise NotImplementedError("Cross-color relifting requires remove_non_edge_like_errors=False")
+            if self.enable_colorcorrelated_decoding:
+                raise NotImplementedError("Cross-color relifting and color-correlated decoding cannot be combined")
+            if custom_dem_data is not None:
+                raise NotImplementedError("Cross-color relifting with BP/custom DEM priors is unsupported")
+            if compute_swim_distance:
+                raise NotImplementedError("Cross-color relifting with matching-growth swim output is unsupported")
+            if erasure_matcher_predecoding or partial_correction_by_predecoding:
+                raise NotImplementedError("Cross-color relifting with predecoding ensembles is unsupported")
+            return self._decode_cross_color_relifting(
+                detector_outcomes, colors, logical_value, full_output, check_validity
+            )
         if self.enable_colorcorrelated_decoding:
             if custom_dem_data is not None:
                 raise NotImplementedError(
@@ -185,7 +264,15 @@ class ConcatMatchingDecoder(BaseDecoder):
         if self.enable_colorcorrelated_decoding:
             colors = ["r", "g", "b"]
             specs = candidate_specs()
-            reweighter = ColorCorrelatedPriorReweighter(self.dem_manager)
+            if self._color_correlated_reweighter is None:
+                self._color_correlated_reweighter = ColorCorrelatedPriorReweighter(
+                    self.dem_manager, self.color_correlated_b)
+            reweighter = self._color_correlated_reweighter
+        if self.enable_colorcorrelated_decoding or self.color_correlated_weight_basis == "original_dem":
+            evaluator = self._candidate_evaluators.get(self.color_correlated_weight_basis)
+            if evaluator is None:
+                evaluator = CandidateEvaluator(self.dem_manager, self.color_correlated_weight_basis)
+                self._candidate_evaluators[self.color_correlated_weight_basis] = evaluator
 
         if compute_swim_distance and detector_outcomes.shape[0] == 0:
             result = np.empty((0,) if self.num_obs == 1 else (0,self.num_obs), dtype=bool)
@@ -301,13 +388,6 @@ class ConcatMatchingDecoder(BaseDecoder):
             color_correlated_run = np.full(num_left_samples, -1, dtype=np.int8)
             best_candidate_indices = np.full(num_left_samples, -1, dtype=int)
             native_candidate_preds = [[None] * 12 for _ in range(num_logical_classes)]
-            original_llr = None
-            if self.color_correlated_weight_basis == "original_dem":
-                original_p = np.asarray(self.dem_manager.probs_xz, dtype=float)
-                if (np.any(original_p <= 0) or np.any(original_p >= 1)
-                        or not np.isfinite(original_p).all()):
-                    raise ValueError("original DEM probabilities must be finite and in (0, 1)")
-                original_llr = np.log((1 - original_p) / original_p)
 
         if num_left_samples > 0 and not (
             erasure_matcher_predecoding and partial_correction_by_predecoding
@@ -335,6 +415,7 @@ class ConcatMatchingDecoder(BaseDecoder):
 
             if compute_swim_distance:
                 swim_by_color = np.empty((num_left_samples,len(colors)))
+                swim_stage2_weights = np.empty((num_left_samples,len(colors)))
             for i in range(len(error_preds_stage1_left)):
                 for i_c, c in enumerate(colors):
                     if verbose:
@@ -366,24 +447,28 @@ class ConcatMatchingDecoder(BaseDecoder):
                             error_preds_new = stage2_result.predictions
                             weights_new = stage2_result.solution_weights
                             swim_by_color[:,i_c] = stage2_result.swim_distances
+                            swim_stage2_weights[:,i_c] = weights_new
                         else:
                             error_preds_new, weights_new = stage2_result
 
-                    # Preserve native stage-2 columns for common-prior rescoring.
                     if self.enable_colorcorrelated_decoding:
-                        native_candidate_preds[i][i_c] = error_preds_new.copy()
-                        base_p = self.dem_manager.dems_decomposed[c].probs[1]
-                        base_llr = np.log((1 - base_p) / base_p)
-                        generation_weights[i, i_c] = weights_new
-                        if original_llr is None:
-                            weights_new = error_preds_new.astype(float) @ base_llr
-
-                    # Map errors back to original DEM ordering
-                    error_preds_new = self.dem_manager.dems_decomposed[
-                        c
-                    ].map_errors_to_org_dem(error_preds_new, stage=2)
-                    if self.enable_colorcorrelated_decoding and original_llr is not None:
-                        weights_new = error_preds_new.astype(float) @ original_llr
+                        (error_preds_new, base_native, weights_new,
+                         generation_weight) = evaluator.evaluate(
+                            c, error_preds_new, weights_new
+                        )
+                        native_candidate_preds[i][i_c] = base_native
+                        generation_weights[i, i_c] = generation_weight
+                    elif self.color_correlated_weight_basis == "original_dem":
+                        # Generate with the ordinary stage-2 matching prior, but
+                        # compare the mapped corrections on the original DEM.
+                        (error_preds_new, _, weights_new, _) = evaluator.evaluate(
+                            c, error_preds_new, weights_new
+                        )
+                    else:
+                        # Preserve the ordinary decoder's historical weights.
+                        error_preds_new = self.dem_manager.dems_decomposed[
+                            c
+                        ].map_errors_to_org_dem(error_preds_new, stage=2)
 
                     error_preds[i, i_c, :, :] = error_preds_new
                     weights[i, i_c, :] = weights_new
@@ -401,8 +486,6 @@ class ConcatMatchingDecoder(BaseDecoder):
                         schedules.append(indices)
                     for i_spec, spec in enumerate(specs[3:], start=3):
                         c = spec.target_color
-                        base_p = self.dem_manager.dems_decomposed[c].probs[1]
-                        base_llr = np.log((1 - base_p) / base_p)
                         for shot in range(num_left_samples):
                             if i_spec not in schedules[shot]:
                                 continue
@@ -410,11 +493,10 @@ class ConcatMatchingDecoder(BaseDecoder):
                                 {name: correction[shot] for name, correction in guides.items()},
                                 spec.guide_colors,
                             )
-                            decomp = self.dem_manager.dems_decomposed[c]
-                            reweighted = reweighter.decomposition(c, guide)
+                            base_decomp = self.dem_manager.dems_decomposed[c]
                             temporary_dem = {c: (
-                                (reweighted.Hs[0], reweighted.probs[0]),
-                                (reweighted.Hs[1], reweighted.probs[1]),
+                                (base_decomp.Hs[0], reweighter.stage1_probabilities(c, guide)),
+                                (base_decomp.Hs[1], base_decomp.probs[1]),
                             )}
                             det = detector_outcomes_left[shot:shot + 1].copy()
                             if self.comparative_decoding:
@@ -424,10 +506,11 @@ class ConcatMatchingDecoder(BaseDecoder):
                                 )
                             stage1 = self._decode_stage1(det, c, temporary_dem)
                             native, generation_weight = self._decode_stage2(
-                                det, stage1, c, temporary_dem
+                                det, stage1, c
                             )
-                            mapped, base_native = align_stage2_to_base(
-                                native[0], reweighted, decomp
+                            (mapped, base_native, selection_weight,
+                             diagnostic_weight) = evaluator.evaluate(
+                                c, native[0], generation_weight[0]
                             )
                             if native_candidate_preds[i][i_spec] is None:
                                 native_candidate_preds[i][i_spec] = np.zeros(
@@ -435,14 +518,9 @@ class ConcatMatchingDecoder(BaseDecoder):
                                 )
                             native_candidate_preds[i][i_spec][shot] = base_native
                             error_preds[i, i_spec, shot] = mapped
-                            generation_weights[i, i_spec, shot] = generation_weight[0]
+                            generation_weights[i, i_spec, shot] = diagnostic_weight
                             candidate_executed[i, i_spec, shot] = True
-                            if original_llr is None:
-                                weights[i, i_spec, shot] = base_native.astype(float) @ base_llr
-                            else:
-                                weights[i, i_spec, shot] = (
-                                    error_preds[i, i_spec, shot].astype(float) @ original_llr
-                                )
+                            weights[i, i_spec, shot] = selection_weight
 
             if self.enable_colorcorrelated_decoding:
                 candidate_weights = weights.copy()
@@ -640,7 +718,7 @@ class ConcatMatchingDecoder(BaseDecoder):
                 from ..soft_output.results import GROWTH_CONVENTION
                 extra_outputs.update(
                     color_order=tuple(colors),
-                    stage2_weights_by_color=weights[0].T.copy(),
+                    stage2_weights_by_color=swim_stage2_weights.copy(),
                     swim_distances_by_color=swim_by_color,
                     selected_swim_distance=swim_by_color[np.arange(num_left_samples),best_color_inds],
                     swim_growth_convention=GROWTH_CONVENTION,
@@ -664,6 +742,298 @@ class ConcatMatchingDecoder(BaseDecoder):
             return obs_preds_final, extra_outputs
         else:
             return obs_preds_final
+
+    def _decode_prior_perturbation(
+        self, detector_outcomes, colors, logical_value, full_output, check_validity
+    ):
+        """Run each fixed common-DEM ensemble member for all three colors."""
+        if colors != "all" and colors != ["r", "g", "b"]:
+            raise ValueError("Prior perturbation requires all three colors r, g, b")
+        if self._perturbation_ensemble is None:
+            self._perturbation_ensemble = PriorPerturbationEnsemble(
+                self.dem_manager, self.perturbation_ensemble_size,
+                self.perturbation_alpha, self.perturbation_seed,
+            )
+        ensemble = self._perturbation_ensemble
+        manager = self.dem_manager
+        detector_outcomes = np.asarray(detector_outcomes, dtype=bool)
+        if detector_outcomes.ndim == 1:
+            detector_outcomes = detector_outcomes[None, :]
+        if logical_value is not None:
+            logical_value = np.asarray(logical_value, dtype=bool).ravel()
+            if logical_value.size != self.num_obs:
+                raise ValueError(f"logical_value must have length {self.num_obs}")
+        logical_classes = (list(itertools.product((False, True), repeat=self.num_obs))
+                           if self.comparative_decoding and logical_value is None
+                           else [logical_value])
+        colors = ("r", "g", "b")
+        members = tuple(m for m in range(self.perturbation_ensemble_size) for _ in colors)
+        targets = colors * self.perturbation_ensemble_size
+        labels = tuple(f"m{m}:{c}" for m in range(self.perturbation_ensemble_size) for c in colors)
+        n_classes, n_shots, n_errors = len(logical_classes), len(detector_outcomes), manager.H.shape[1]
+        n_candidates = len(labels)
+        mapped = np.zeros((n_classes, n_candidates, n_shots, n_errors), dtype=bool)
+        stage1_hypotheses = [[None] * n_candidates for _ in range(n_classes)]
+        native = [[None] * n_candidates for _ in range(n_classes)]
+        weights = np.empty((n_classes, n_candidates, n_shots), dtype=float)
+        generations = np.empty_like(weights)
+        evaluator = CandidateEvaluator(manager, self.color_correlated_weight_basis)
+        for class_index, logical in enumerate(logical_classes):
+            det = detector_outcomes.copy()
+            if self.comparative_decoding:
+                det[:, -self.num_obs:] = logical
+            for member in range(self.perturbation_ensemble_size):
+                decompositions = ensemble.decompositions[member]
+                for color_index, color in enumerate(colors):
+                    slot = 3 * member + color_index
+                    temporary = decompositions[color]
+                    custom = None if member == 0 else {
+                        color: tuple(zip(temporary.Hs, temporary.probs))
+                    }
+                    stage1 = self._decode_stage1(det, color, custom)
+                    stage1_hypotheses[class_index][slot] = np.asarray(stage1, dtype=bool).copy()
+                    stage2, generation = self._decode_stage2(det, stage1, color, custom)
+                    correction, aligned, score, diagnostic = evaluator.evaluate(
+                        color, stage2, generation,
+                        temporary=None if member == 0 else temporary,
+                    )
+                    mapped[class_index, slot] = correction
+                    native[class_index][slot] = aligned
+                    weights[class_index, slot] = score
+                    generations[class_index, slot] = diagnostic
+        if n_shots:
+            best_class, best_slot, selected_weights, gaps = _get_final_predictions(weights)
+            selected = mapped[best_class, best_slot, np.arange(n_shots)]
+            if self.comparative_decoding:
+                observed = np.asarray([logical_classes[i] for i in best_class], dtype=bool)
+                if logical_value is not None:
+                    observed[:] = logical_value
+            else:
+                observed = np.asarray((selected.astype(np.uint8) @ manager.obs_matrix.T) % 2, dtype=bool)
+            best_colors = np.asarray([color_to_color_val(targets[i]) for i in best_slot], dtype=np.uint8)
+        else:
+            selected = np.zeros((0, n_errors), dtype=bool)
+            observed = np.zeros((0, self.num_obs), dtype=bool)
+            selected_weights = np.zeros(0)
+            best_slot = np.zeros(0, dtype=int)
+            best_colors = np.zeros(0, dtype=np.uint8)
+            gaps = None
+        output = observed.ravel() if self.num_obs == 1 else observed
+        if not full_output:
+            return output
+        extra = dict(
+            best_colors=best_colors, weights=selected_weights, error_preds=selected,
+            baseline_predictions=_ordinary_baseline_predictions(
+                mapped, generations, manager, logical_classes,
+                self.comparative_decoding, self.num_obs),
+            candidate_labels=labels, candidate_target_colors=targets,
+            candidate_ensemble_members=members, candidate_weights=weights,
+            candidate_weight_basis=self.color_correlated_weight_basis,
+            candidate_generation_weights=generations,
+            candidate_native_stage2_preds=native, best_candidate_indices=best_slot,
+            candidate_stage1_hypotheses=stage1_hypotheses,
+            candidate_original_corrections=mapped,
+        )
+        if gaps is not None:
+            extra.update(logical_gaps=gaps, logical_values=np.asarray(
+                list(itertools.product((False, True), repeat=self.num_obs))))
+        if check_validity:
+            extra["validity"] = np.all(
+                np.asarray((selected.astype(np.uint8) @ manager.H.T) % 2, dtype=bool)
+                == detector_outcomes, axis=1,
+            )
+        return output, extra
+
+    def _decode_cross_color_relifting(
+        self, detector_outcomes, colors, logical_value, full_output, check_validity
+    ):
+        """Decode canonical relift slots with class-local syndrome caching."""
+        if colors != "all" and colors != ["r", "g", "b"]:
+            raise ValueError("Cross-color relifting requires all three colors r, g, b")
+        colors = relift.COLORS
+        manager = self.dem_manager
+        for color in colors:
+            decomp = manager.dems_decomposed[color]
+            for stage, H in enumerate(decomp.Hs, start=1):
+                if np.any(np.diff(H.tocsc().indptr) > 2):
+                    raise NotImplementedError(
+                        f"Cross-color relifting unsupported: full {color} stage-{stage} decomposition is not graphlike"
+                    )
+            if np.any(np.diff(decomp.error_map_matrices[1].tocsc().indptr) > 1):
+                raise NotImplementedError(
+                    f"Cross-color relifting unsupported: {color} stage-2 original mapping is not one-to-one"
+                )
+        detector_outcomes = np.asarray(detector_outcomes, dtype=bool)
+        if detector_outcomes.ndim == 1:
+            detector_outcomes = detector_outcomes[None, :]
+        if logical_value is not None:
+            logical_value = np.asarray(logical_value, dtype=bool).ravel()
+            if logical_value.size != self.num_obs:
+                raise ValueError(f"logical_value must have length {self.num_obs}")
+        logical_classes = (list(itertools.product((False, True), repeat=self.num_obs))
+                           if self.comparative_decoding and logical_value is None
+                           else [logical_value])
+        specs = relift.candidate_specs()
+        n_classes, n_shots, n_errors = len(logical_classes), len(detector_outcomes), manager.H.shape[1]
+        mapped = np.zeros((n_classes, 12, n_shots, n_errors), dtype=bool)
+        native = [[None] * 12 for _ in range(n_classes)]
+        weights = np.full((n_classes, 12, n_shots), np.inf)
+        generations = np.full_like(weights, np.nan)
+        validity = np.zeros_like(weights, dtype=bool)
+        executed = np.zeros_like(weights, dtype=bool)
+        alias = np.full(weights.shape, -1, dtype=int)
+        run_class = np.full((n_classes, n_shots), -1, dtype=np.int8)
+        extra_calls = np.zeros((n_classes, n_shots), dtype=np.int8)
+        pairwise_baseline_syndrome_equal = np.zeros((n_classes, n_shots), dtype=np.int8)
+        cache_skips = np.zeros((n_classes, n_shots), dtype=np.int8)
+        evaluator = CandidateEvaluator(manager, self.color_correlated_weight_basis)
+
+        def store(class_index, slot, shot, result, did_execute=False, alias_slot=-1):
+            correction, base_native, weight, generation = result
+            mapped[class_index, slot, shot] = correction
+            if native[class_index][slot] is None:
+                native[class_index][slot] = np.zeros((n_shots, len(base_native)), dtype=bool)
+            native[class_index][slot][shot] = base_native
+            weights[class_index, slot, shot] = weight
+            generations[class_index, slot, shot] = generation
+            validity[class_index, slot, shot] = True
+            executed[class_index, slot, shot] = did_execute
+            alias[class_index, slot, shot] = alias_slot
+
+        for class_index, logical in enumerate(logical_classes):
+            det = detector_outcomes.copy()
+            if self.comparative_decoding:
+                det[:, -self.num_obs:] = logical
+            stage1 = {c: self._decode_stage1(det, c) for c in colors}
+            stage1 = {c: np.asarray(v, dtype=bool) for c, v in stage1.items()}
+            baseline = {}
+            for color_index, color in enumerate(colors):
+                native_batch, generation_batch = self._decode_stage2(det, stage1[color], color)
+                for shot in range(n_shots):
+                    evaluated = evaluator.evaluate(color, native_batch[shot], generation_batch[shot])
+                    result = tuple(np.asarray(v).copy() for v in evaluated)
+                    baseline[color] = baseline.get(color, []) + [result]
+                    store(class_index, color_index, shot, result, did_execute=True)
+            for shot in range(n_shots):
+                sources = {c: baseline[c][shot][0] for c in colors}
+                category = relift.classify(sources)
+                run_class[class_index, shot] = category
+                cache = {}
+                for color_index, color in enumerate(colors):
+                    syndrome = relift.stage2_syndrome(
+                        det[shot], stage1[color][shot], color, manager.detector_ids_by_color
+                    )
+                    cache[(color, syndrome.tobytes())] = (color_index, baseline[color][shot])
+                # Count all six pairwise target problems, including candidates
+                # pruned by the baseline multiplicity schedule.
+                for spec in specs[3:9]:
+                    target = spec.target_color
+                    projected = relift.projection(
+                        sources[spec.source_colors[0]],
+                        manager.dems_decomposed[target].error_map_matrices[0],
+                    )
+                    if np.array_equal(projected, stage1[target][shot]):
+                        pairwise_baseline_syndrome_equal[class_index, shot] += 1
+                for slot, spec in enumerate(specs[3:], start=3):
+                    target = spec.target_color
+                    target_slot = colors.index(target)
+                    if category == 0:
+                        store(class_index, slot, shot, baseline[target][shot], alias_slot=target_slot)
+                        continue
+                    if category == 1:
+                        alias_slot = relift.alias_for_class_one(spec, sources, specs)
+                        if alias_slot is not None:
+                            prior = (mapped[class_index, alias_slot, shot],
+                                     native[class_index][alias_slot][shot],
+                                     weights[class_index, alias_slot, shot],
+                                     generations[class_index, alias_slot, shot])
+                            store(class_index, slot, shot, prior, alias_slot=alias_slot)
+                            continue
+                    H1 = manager.dems_decomposed[target].Hs[0]
+                    A1 = manager.dems_decomposed[target].error_map_matrices[0]
+                    projected = [relift.projection(sources[source], A1)
+                                 for source in spec.source_colors]
+                    for hypothesis in projected:
+                        if not relift.stage1_valid(hypothesis, H1, det[shot]):
+                            raise RuntimeError("Cross-color relift violates target stage-1 syndrome")
+                    hypothesis = (projected[0] if len(projected) == 1 else
+                                  relift.anchored(stage1[target][shot], *projected))
+                    if not relift.stage1_valid(hypothesis, H1, det[shot]):
+                        raise RuntimeError("Anchored cross-color relift violates target stage-1 syndrome")
+                    syndrome = relift.stage2_syndrome(
+                        det[shot], hypothesis, target, manager.detector_ids_by_color
+                    )
+                    key = (target, syndrome.tobytes())
+                    if key in cache:
+                        prior_slot, prior = cache[key]
+                        store(class_index, slot, shot, prior, alias_slot=prior_slot)
+                        cache_skips[class_index, shot] += 1
+                        continue
+                    new_native, new_generation = self._decode_stage2(
+                        det[shot:shot + 1], hypothesis[None, :], target
+                    )
+                    evaluated = evaluator.evaluate(target, new_native[0], new_generation[0])
+                    result = tuple(np.asarray(v).copy() for v in evaluated)
+                    cache[key] = (slot, result)
+                    store(class_index, slot, shot, result, did_execute=True)
+                    extra_calls[class_index, shot] += 1
+
+        if n_shots:
+            best_class, best_slot, selected_weights, gaps = _get_final_predictions(weights)
+            selected = mapped[best_class, best_slot, np.arange(n_shots)]
+            if self.comparative_decoding:
+                observed = np.asarray([logical_classes[i] for i in best_class], dtype=bool)
+                if logical_value is not None:
+                    observed[:] = logical_value
+            else:
+                observed = np.asarray((selected.astype(np.uint8) @ manager.obs_matrix.T) % 2, dtype=bool)
+            best_colors = np.asarray([color_to_color_val(specs[i].target_color) for i in best_slot], dtype=np.uint8)
+            selected_run = run_class[best_class, np.arange(n_shots)]
+            selected_calls = extra_calls[best_class, np.arange(n_shots)]
+            selected_pairwise_equal = pairwise_baseline_syndrome_equal[best_class, np.arange(n_shots)]
+            selected_cache_skips = cache_skips[best_class, np.arange(n_shots)]
+        else:
+            selected = np.zeros((0, n_errors), dtype=bool)
+            observed = np.zeros((0, self.num_obs), dtype=bool)
+            best_colors = np.zeros(0, dtype=np.uint8)
+            selected_weights = np.zeros(0)
+            best_slot = np.zeros(0, dtype=int)
+            selected_run = np.zeros(0, dtype=np.int8)
+            selected_calls = np.zeros(0, dtype=np.int8)
+            selected_pairwise_equal = np.zeros(0, dtype=np.int8)
+            selected_cache_skips = np.zeros(0, dtype=np.int8)
+            gaps = None
+        output = observed.ravel() if self.num_obs == 1 else observed
+        if not full_output:
+            return output
+        extra = dict(best_colors=best_colors, weights=selected_weights, error_preds=selected,
+                     baseline_predictions=_ordinary_baseline_predictions(
+                         mapped, generations, manager, logical_classes,
+                         self.comparative_decoding, self.num_obs),
+                     candidate_labels=tuple(s.label for s in specs),
+                     candidate_target_colors=tuple(s.target_color for s in specs),
+                     candidate_source_colors=tuple(s.source_colors for s in specs),
+                     candidate_anchor_colors=tuple(s.target_color if s.kind == "all_color_relift" else None for s in specs),
+                     candidate_kinds=tuple(s.kind for s in specs),
+                     candidate_weights=weights, candidate_weight_basis=self.color_correlated_weight_basis,
+                     candidate_generation_weights=generations, candidate_stage1_validity=validity,
+                     candidate_executed=executed, candidate_alias_of=alias,
+                     candidate_native_stage2_preds=native, best_candidate_indices=best_slot,
+                     relift_run_class=selected_run, relift_extra_stage2_calls=selected_calls,
+                     relift_pairwise_baseline_syndrome_equal=selected_pairwise_equal,
+                     relift_cache_skips=selected_cache_skips,
+                     relift_pairwise_baseline_syndrome_equal_by_logical_class=pairwise_baseline_syndrome_equal,
+                     relift_cache_skips_by_logical_class=cache_skips,
+                     relift_run_class_by_logical_class=run_class,
+                     relift_extra_stage2_calls_by_logical_class=extra_calls)
+        if gaps is not None:
+            extra.update(logical_gaps=gaps, logical_values=np.asarray(list(itertools.product((False, True), repeat=self.num_obs))))
+        if check_validity:
+            extra["validity"] = np.all(
+                np.asarray((selected.astype(np.uint8) @ manager.H.T) % 2, dtype=bool) == detector_outcomes,
+                axis=1,
+            )
+        return output, extra
 
     def _decode_stage1(
         self,
@@ -699,6 +1069,14 @@ class ConcatMatchingDecoder(BaseDecoder):
                 self.dem_manager.dems_decomposed[color].probs[0],
             )
 
+        cache_key = None
+        if self.enable_colorcorrelated_decoding and custom_dem_data and color in custom_dem_data:
+            cache_key = (color, np.asarray(p).tobytes())
+            if cache_key in self._color_correlated_stage1_matchings:
+                self._color_correlated_stage1_matchings.move_to_end(cache_key)
+                checks_to_keep, matching = self._color_correlated_stage1_matchings[cache_key]
+                return matching.decode_batch(det_outcomes_dem1[:, checks_to_keep])
+
         # Remove empty checks
         checks_to_keep = H.tocsr().getnnz(axis=1) > 0
         det_outcomes_dem1 = det_outcomes_dem1[:, checks_to_keep]
@@ -707,6 +1085,10 @@ class ConcatMatchingDecoder(BaseDecoder):
         # MWPM decoding
         weights = np.log((1 - p) / p)
         matching = pymatching.Matching.from_check_matrix(H, weights=weights)
+        if cache_key is not None:
+            self._color_correlated_stage1_matchings[cache_key] = (checks_to_keep, matching)
+            if len(self._color_correlated_stage1_matchings) > 32:
+                self._color_correlated_stage1_matchings.popitem(last=False)
         preds_dem1 = matching.decode_batch(det_outcomes_dem1)
 
         del det_outcomes_dem1, matching
@@ -770,8 +1152,15 @@ class ConcatMatchingDecoder(BaseDecoder):
                 self._swim_backends[color] = backend
             return backend.decode(det_outcome_dem2)
 
-        weights = np.log((1 - p) / p)
-        matching = pymatching.Matching.from_check_matrix(H, weights=weights)
+        if self.enable_colorcorrelated_decoding and custom_dem_data is None:
+            matching = self._color_correlated_stage2_matchings.get(color)
+            if matching is None:
+                weights = np.log((1 - p) / p)
+                matching = pymatching.Matching.from_check_matrix(H, weights=weights)
+                self._color_correlated_stage2_matchings[color] = matching
+        else:
+            weights = np.log((1 - p) / p)
+            matching = pymatching.Matching.from_check_matrix(H, weights=weights)
         preds, weights_new = matching.decode_batch(
             det_outcome_dem2, return_weights=True
         )

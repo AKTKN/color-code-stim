@@ -102,7 +102,13 @@ class ColorCode:
         perfect_first_syndrome_extraction: bool = False,
         comparative_decoding: bool = False,
         enable_colorcorrelated_decoding: bool = False,
-        color_correlated_weight_basis: Literal["stage2", "original_dem"] = "stage2",
+        color_correlated_b: float = 1.0,
+        enable_cross_color_relifting: bool = False,
+        enable_prior_perturbation: bool = False,
+        perturbation_ensemble_size: int = 1,
+        perturbation_alpha: float = 0.0,
+        perturbation_seed: int | None = None,
+        color_correlated_weight_basis: Optional[Literal["stage2", "original_dem"]] = None,
         exclude_non_essential_pauli_detectors: bool = False,
         cultivation_circuit: Optional[stim.Circuit] = None,
         remove_non_edge_like_errors: bool = True,
@@ -220,13 +226,18 @@ class ColorCode:
             decoding.
         enable_colorcorrelated_decoding : bool, default False
             Generate nine additional color-guided two-stage candidates and select
-            among all twelve using the original monochromatic stage-2 prior.
+            among all twelve using the original X/Z DEM prior.
             Requires all three colors and is incompatible with BP predecoding
             and matching-growth swim output.
-        color_correlated_weight_basis : {'stage2', 'original_dem'}, default 'stage2'
-            Candidate selection weight when color-correlated decoding is enabled.
+        color_correlated_b : float, default 1.0
+            Positive finite guide exponent denominator. Guided source priors
+            become q**(1/b) for stage 1 only; b=1 leaves them unchanged.
+        color_correlated_weight_basis : {'stage2', 'original_dem'}, optional
+            Final candidate selection weight for ordinary concatenated matching,
+            color-correlated decoding, cross-color relifting, and prior perturbation.
             'original_dem' scores mapped stage-2 corrections with the unchanged
-            probabilities of the pre-decomposition X/Z DEM.
+            probabilities of the pre-decomposition X/Z DEM. Color-correlated
+            decoding requires 'original_dem'; other modes default to 'stage2'.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -402,8 +413,30 @@ class ColorCode:
 
         self.comparative_decoding = comparative_decoding
         self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
+        if type(color_correlated_b) not in (int, float) or not np.isfinite(color_correlated_b) or color_correlated_b <= 0:
+            raise ValueError("color_correlated_b must be positive and finite")
+        self.color_correlated_b = float(color_correlated_b)
+        self.enable_cross_color_relifting = enable_cross_color_relifting
+        self.enable_prior_perturbation = enable_prior_perturbation
+        if not isinstance(perturbation_ensemble_size, int) or perturbation_ensemble_size < 1:
+            raise ValueError("perturbation_ensemble_size must be >= 1")
+        if not np.isfinite(perturbation_alpha) or not 0 <= perturbation_alpha <= 1:
+            raise ValueError("perturbation_alpha must be between 0 and 1")
+        self.perturbation_ensemble_size = perturbation_ensemble_size
+        self.perturbation_alpha = perturbation_alpha
+        self.perturbation_seed = perturbation_seed
+        if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
+            raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
+        if enable_cross_color_relifting and enable_colorcorrelated_decoding:
+            raise NotImplementedError("Cross-color relifting and color-correlated decoding cannot be combined")
+        if enable_cross_color_relifting and remove_non_edge_like_errors:
+            raise NotImplementedError("Cross-color relifting requires remove_non_edge_like_errors=False")
+        if color_correlated_weight_basis is None:
+            color_correlated_weight_basis = "original_dem" if enable_colorcorrelated_decoding else "stage2"
         if color_correlated_weight_basis not in ("stage2", "original_dem"):
             raise ValueError("color_correlated_weight_basis must be 'stage2' or 'original_dem'")
+        if enable_colorcorrelated_decoding and color_correlated_weight_basis != "original_dem":
+            raise ValueError("color-correlated decoding requires original_dem selection basis")
         self.color_correlated_weight_basis = color_correlated_weight_basis
 
         self.exclude_non_essential_pauli_detectors = (
@@ -545,6 +578,12 @@ class ColorCode:
             self._concat_matching_decoder = ConcatMatchingDecoder(
                 dem_manager=self.dem_manager,
                 enable_colorcorrelated_decoding=self.enable_colorcorrelated_decoding,
+                color_correlated_b=self.color_correlated_b,
+                enable_cross_color_relifting=self.enable_cross_color_relifting,
+                enable_prior_perturbation=self.enable_prior_perturbation,
+                perturbation_ensemble_size=self.perturbation_ensemble_size,
+                perturbation_alpha=self.perturbation_alpha,
+                perturbation_seed=self.perturbation_seed,
                 color_correlated_weight_basis=self.color_correlated_weight_basis,
             )
         return self._concat_matching_decoder
@@ -976,6 +1015,10 @@ class ColorCode:
         """
         if self.enable_colorcorrelated_decoding and bp_predecoding:
             raise NotImplementedError("Color-correlated decoding with BP predecoding is not supported")
+        if self.enable_cross_color_relifting and bp_predecoding:
+            raise NotImplementedError("Cross-color relifting with BP predecoding is unsupported")
+        if self.enable_prior_perturbation and bp_predecoding:
+            raise NotImplementedError("Prior perturbation with BP predecoding is unsupported")
         if compute_swim_distance and bp_predecoding:
             raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
@@ -1283,8 +1326,15 @@ class ColorCode:
         instance.enable_colorcorrelated_decoding = data.get(
             "enable_colorcorrelated_decoding", False
         )
+        instance.color_correlated_b = data.get("color_correlated_b", 1.0)
+        instance.enable_cross_color_relifting = data.get("enable_cross_color_relifting", False)
+        instance.enable_prior_perturbation = data.get("enable_prior_perturbation", False)
+        instance.perturbation_ensemble_size = data.get("perturbation_ensemble_size", 1)
+        instance.perturbation_alpha = data.get("perturbation_alpha", 0.0)
+        instance.perturbation_seed = data.get("perturbation_seed", None)
         instance.color_correlated_weight_basis = data.get(
-            "color_correlated_weight_basis", "stage2"
+            "color_correlated_weight_basis",
+            "original_dem" if instance.enable_colorcorrelated_decoding else "stage2",
         )
 
         # Reconstruct non-picklable attributes in the correct order
