@@ -1,3 +1,5 @@
+## (Proceeding) Soft-output integration.
+
 # color-code-stim
 Python package for simulating &amp; decoding 2D color code circuits via the [concatenated MWPM decoder](https://quantum-journal.org/papers/q-2025-01-27-1609).
 
@@ -20,6 +22,87 @@ Set `superdense_circuit=True` when initializing a `ColorCode` instance. By defau
 - **Comparative decoding \& calculation of the logical gap** <br>
 By setting `comparative_decoding=True` (default is `False`) when defining a `ColorCode` object, the concatenated MWPM decoder can be executed multiple times over all distinct logical classes. The minimum-weight correction is chosen as the final correction, and the resulting **logical gap** quantifies its reliability, which can be used for post-selection. This feature was not discussed in our original [paper](https://doi.org/10.22331/q-2025-01-27-1609) but has been added for our following [paper](https://arxiv.org/abs/2409.07707) on color code magic state distillation.
 - **Easy Monte-Carlo simulation to evaluate the decoder performance.** <br>
+
+### Color-correlated concatenated decoding
+
+Set `enable_colorcorrelated_decoding=True` on `ColorCode` to generate the three
+ordinary color candidates plus nine source-guided candidates per logical class:
+
+```python
+code = ColorCode(d=3, rounds=1, p_bitflip=0.05,
+                 enable_colorcorrelated_decoding=True)
+predictions, details = code.decode(detector_outcomes, full_output=True)
+```
+
+When all ordinary corrections differ, each target color is decoded again using
+either other color as a guide, then their Boolean OR as a guide. For each extra
+candidate, the guide's original
+X/Z DEM mechanisms receive prior `q**(1/color_correlated_b)` for stage 1.
+The original symbolic source map supplies those stage-1 probabilities without
+rebuilding the DEM. Stage 2 is rerun with the unchanged original matrix and
+prior. All candidates are compared using the unchanged original X/Z DEM
+log-odds. `details` includes
+`candidate_labels`, `candidate_weights`, `best_candidate_indices`, the selected
+`weights`, `best_colors`, and original-DEM `error_preds`. Comparative decoding
+computes its logical gap from each class's minimum over twelve candidates.
+
+The three ordinary corrections are first mapped into original X/Z DEM
+mechanism order. If all three are identical, no guided candidate is run
+(`color_correlated_run=0`). If exactly two are identical, only three guided
+candidates are run: each repeated-color target uses the distinct-color guide,
+and the distinct-color target uses the first repeated color in `r,g,b` order
+(`color_correlated_run=1`). If all differ, all nine guided candidates are run
+(`color_correlated_run=2`). The 12-slot diagnostic arrays retain skipped
+candidates as `+inf` weights with `candidate_executed=False`; this does not
+alter the common-prior minimum. In comparative decoding the reported run
+category belongs to the selected logical class. Erasure-predecoded shots,
+which have no ordinary three-candidate comparison, report `-1` in this
+decoder diagnostic and are not supported by the YAML metric writer.
+
+Color-correlated decoding requires `color_correlated_weight_basis="original_dem"`
+(its default) to compare all twelve
+candidates after mapping their stage-2 corrections to the pre-decomposition
+X/Z DEM (`dem_xz`). The score is the sum of original DEM log-odds weights
+`log((1-q)/q)` for the mapped mechanisms. This basis is used for candidate
+selection, `weights`, and comparative logical gaps. For the standard
+decomposition, stage-2 columns each map to one original DEM mechanism, so
+this score agrees with the stage-2 score up to floating-point error.
+`candidate_weight_basis` in `details` records the selected basis. The default
+for other modes remains `"stage2"`; neither score is
+a full posterior probability of a logical class.
+
+The same option also applies to ordinary concatenated matching: it compares
+the three ordinary color corrections using their mapped original X/Z DEM
+weights. The default `"stage2"` keeps the historical matching-weight choice.
+Both stage-1 and stage-2 matchings are unchanged by this selection option.
+
+Guide reweighting changes only the stage-1 priors. The base DEM, stage-2
+priors, and candidate-scoring prior remain unchanged. Symbolic source maps,
+stage-2 matchers, and a bounded cache of stage-1 priors and matchers avoid
+repeated per-shot setup.
+
+### Advanced candidate budgets
+
+These three advanced modes are mutually exclusive. Ordinary concatenated
+matching has three candidates and six MWPM calls per logical class.
+Cross-color relifting (`enable_cross_color_relifting=True`) retains 12 canonical
+logical candidate slots and has a maximum of 15 calls per class; equality of
+mapped baseline corrections and duplicate target Stage-2 syndromes dynamically
+prune actual calls. It requires `remove_non_edge_like_errors=False` and a
+graphlike full decomposition. The X/Z-DEM perturbation ensemble
+(`enable_prior_perturbation=True`, `perturbation_ensemble_size=M`) has `3*M`
+candidates and `6*M` calls per class. Color-correlated decoding retains 12
+slots: its baseline requires six calls, with zero, three, or nine guided
+reruns for baseline equality classes 0, 1, or 2 respectively (six, twelve,
+or 24 total calls). The `relift_run` and `color_correlated_run` values classify
+baseline solution multiplicity in original X/Z DEM order, not actual runtime.
+Both use the same exact equality rule and the first equal representative in
+`r,g,b` order. Selection always uses `candidate_weight_basis`; generation
+weights are diagnostics.
+
+This option requires all three colors and unit-multiplicity source provenance.
+It currently cannot be combined with BP/custom DEM priors or matching-growth
+swim output. The default remains the ordinary three-candidate decoder.
 
 ## Project Structure
 

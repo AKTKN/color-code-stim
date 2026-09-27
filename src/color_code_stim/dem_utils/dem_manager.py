@@ -61,6 +61,7 @@ class DemManager:
         circuit_type: str,
         comparative_decoding: bool = False,
         remove_non_edge_like_errors: bool = True,
+        swim_data_only: bool = False,
     ):
         """
         Initialize DEMManager with circuit and configuration.
@@ -79,6 +80,7 @@ class DemManager:
             Whether to remove non-edge-like errors in decomposition
         """
         # Store configuration
+        self.swim_data_only = swim_data_only
         self.circuit = circuit
         self.tanner_graph = tanner_graph
         self.circuit_type = circuit_type
