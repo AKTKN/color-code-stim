@@ -34,16 +34,30 @@ code = ColorCode(d=3, rounds=1, p_bitflip=0.05,
 predictions, details = code.decode(detector_outcomes, full_output=True)
 ```
 
-Each target color is decoded again using either other color as a guide, then
-their Boolean OR as a guide. For each extra candidate, the guide's original
+When all ordinary corrections differ, each target color is decoded again using
+either other color as a guide, then their Boolean OR as a guide. For each extra
+candidate, the guide's original
 X/Z DEM mechanisms are conditioned on being active (probability `1-1e-14`);
 the modified original DEM is decomposed again for that target color and both
-matching stages are rerun. All twelve candidates are compared using the
-unmodified stage-2 prior,
+matching stages are rerun. All represented candidates are compared using an
+unmodified common prior (the ordinary stage-2 prior by default),
 since their generation weights come from different priors. `details` includes
 `candidate_labels`, `candidate_weights`, `best_candidate_indices`, the selected
 `weights`, `best_colors`, and original-DEM `error_preds`. Comparative decoding
 computes its logical gap from each class's minimum over twelve candidates.
+
+The three ordinary corrections are first mapped into original X/Z DEM
+mechanism order. If all three are identical, no guided candidate is run
+(`color_correlated_run=0`). If exactly two are identical, only three guided
+candidates are run: each repeated-color target uses the distinct-color guide,
+and the distinct-color target uses the first repeated color in `r,g,b` order
+(`color_correlated_run=1`). If all differ, all nine guided candidates are run
+(`color_correlated_run=2`). The 12-slot diagnostic arrays retain skipped
+candidates as `+inf` weights with `candidate_executed=False`; this does not
+alter the common-prior minimum. In comparative decoding the reported run
+category belongs to the selected logical class. Erasure-predecoded shots,
+which have no ordinary three-candidate comparison, report `-1` in this
+decoder diagnostic and are not supported by the YAML metric writer.
 
 Set `color_correlated_weight_basis="original_dem"` to compare all twelve
 candidates after mapping their stage-2 corrections to the pre-decomposition

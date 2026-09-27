@@ -13,7 +13,8 @@ import pymatching
 
 from .base import BaseDecoder
 from .color_correlated_decoding import (
-    ColorCorrelatedPriorReweighter, align_stage2_to_base, candidate_specs, guide_union,
+    ColorCorrelatedPriorReweighter, align_stage2_to_base, candidate_schedule,
+    candidate_specs, guide_union,
 )
 from ..config import COLOR_LABEL, color_to_color_val
 from ..dem_utils.dem_manager import DemManager
@@ -295,6 +296,9 @@ class ConcatMatchingDecoder(BaseDecoder):
         if self.enable_colorcorrelated_decoding:
             candidate_weights = np.full((num_logical_classes, 12, num_left_samples), np.nan)
             generation_weights = np.full_like(candidate_weights, np.nan)
+            candidate_executed = np.zeros(candidate_weights.shape, dtype=bool)
+            run_by_class = np.full((num_logical_classes, num_left_samples), -1, dtype=np.int8)
+            color_correlated_run = np.full(num_left_samples, -1, dtype=np.int8)
             best_candidate_indices = np.full(num_left_samples, -1, dtype=int)
             native_candidate_preds = [[None] * 12 for _ in range(num_logical_classes)]
             original_llr = None
@@ -311,13 +315,23 @@ class ConcatMatchingDecoder(BaseDecoder):
             num_errors = self.dem_manager.H.shape[1]
 
             num_candidates = 12 if self.enable_colorcorrelated_decoding else len(colors)
-            error_preds = np.empty(
-                (num_logical_classes, num_candidates, num_left_samples, num_errors),
-                dtype=bool,
-            )
-            weights = np.empty(
-                (num_logical_classes, num_candidates, num_left_samples), dtype=float
-            )
+            if self.enable_colorcorrelated_decoding:
+                error_preds = np.zeros(
+                    (num_logical_classes, num_candidates, num_left_samples, num_errors),
+                    dtype=bool,
+                )
+                weights = np.full(
+                    (num_logical_classes, num_candidates, num_left_samples), np.inf
+                )
+                generation_weights[:, 3:, :] = np.inf
+            else:
+                error_preds = np.empty(
+                    (num_logical_classes, num_candidates, num_left_samples, num_errors),
+                    dtype=bool,
+                )
+                weights = np.empty(
+                    (num_logical_classes, num_candidates, num_left_samples), dtype=float
+                )
 
             if compute_swim_distance:
                 swim_by_color = np.empty((num_left_samples,len(colors)))
@@ -373,16 +387,25 @@ class ConcatMatchingDecoder(BaseDecoder):
 
                     error_preds[i, i_c, :, :] = error_preds_new
                     weights[i, i_c, :] = weights_new
+                    if self.enable_colorcorrelated_decoding:
+                        candidate_executed[i, i_c, :] = True
 
                 if self.enable_colorcorrelated_decoding:
                     # Guides are the three baseline original-DEM corrections of
                     # this logical class. The two-guide case is Boolean union.
                     guides = {c: error_preds[i, j] for j, c in enumerate(colors)}
+                    schedules = []
+                    for shot in range(num_left_samples):
+                        category, indices = candidate_schedule(error_preds[i, :3, shot])
+                        run_by_class[i, shot] = category
+                        schedules.append(indices)
                     for i_spec, spec in enumerate(specs[3:], start=3):
                         c = spec.target_color
                         base_p = self.dem_manager.dems_decomposed[c].probs[1]
                         base_llr = np.log((1 - base_p) / base_p)
                         for shot in range(num_left_samples):
+                            if i_spec not in schedules[shot]:
+                                continue
                             guide = guide_union(
                                 {name: correction[shot] for name, correction in guides.items()},
                                 spec.guide_colors,
@@ -407,12 +430,13 @@ class ConcatMatchingDecoder(BaseDecoder):
                                 native[0], reweighted, decomp
                             )
                             if native_candidate_preds[i][i_spec] is None:
-                                native_candidate_preds[i][i_spec] = np.empty(
+                                native_candidate_preds[i][i_spec] = np.zeros(
                                     (num_left_samples, base_native.shape[0]), dtype=bool
                                 )
                             native_candidate_preds[i][i_spec][shot] = base_native
                             error_preds[i, i_spec, shot] = mapped
                             generation_weights[i, i_spec, shot] = generation_weight[0]
+                            candidate_executed[i, i_spec, shot] = True
                             if original_llr is None:
                                 weights[i, i_spec, shot] = base_native.astype(float) @ base_llr
                             else:
@@ -429,6 +453,9 @@ class ConcatMatchingDecoder(BaseDecoder):
             )
             if self.enable_colorcorrelated_decoding:
                 best_candidate_indices = best_color_inds.copy()
+                color_correlated_run = run_by_class[
+                    best_logical_classes, np.arange(num_left_samples)
+                ]
 
             error_preds_final = error_preds[
                 best_logical_classes, best_color_inds, np.arange(num_left_samples), :
@@ -507,6 +534,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                     best_candidate_indices = extra_outputs["best_candidate_indices"]
                     candidate_weights = extra_outputs["candidate_weights"]
                     generation_weights = extra_outputs["candidate_generation_weights"]
+                    candidate_executed = extra_outputs["candidate_executed"]
+                    color_correlated_run = extra_outputs["color_correlated_run"]
                     native_candidate_preds = extra_outputs["candidate_native_stage2_preds"]
 
         else:
@@ -561,6 +590,16 @@ class ConcatMatchingDecoder(BaseDecoder):
                     full_generation_weights[:, :, predecoding_failure] = generation_weights
                     candidate_weights = full_candidate_weights
                     generation_weights = full_generation_weights
+                    full_candidate_executed = np.zeros(
+                        (num_logical_classes, 12, detector_outcomes.shape[0]), dtype=bool
+                    )
+                    full_candidate_executed[:, :, predecoding_failure] = candidate_executed
+                    candidate_executed = full_candidate_executed
+                    full_color_correlated_run = np.full(
+                        detector_outcomes.shape[0], -1, dtype=np.int8
+                    )
+                    full_color_correlated_run[predecoding_failure] = color_correlated_run
+                    color_correlated_run = full_color_correlated_run
 
         # Validity checking
         if check_validity:
@@ -590,6 +629,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                     candidate_target_colors=tuple(spec.target_color for spec in specs),
                     best_candidate_indices=best_candidate_indices,
                     candidate_weights=candidate_weights,
+                    candidate_executed=candidate_executed,
+                    color_correlated_run=color_correlated_run,
                     candidate_weight_basis=self.color_correlated_weight_basis,
                     candidate_generation_weights=generation_weights,
                     candidate_native_stage2_preds=native_candidate_preds,

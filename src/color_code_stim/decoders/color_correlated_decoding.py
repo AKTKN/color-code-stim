@@ -47,6 +47,38 @@ def guide_union(baseline_corrections: dict[str, np.ndarray],
     return np.logical_or.reduce([baseline_corrections[c] for c in guide_colors])
 
 
+def candidate_schedule(baseline: np.ndarray) -> tuple[int, tuple[int, ...]]:
+    """Classify three mapped corrections and choose only necessary reruns.
+
+    The first matching color in r/g/b order represents a duplicated guide.
+    Returned indices address candidate_specs(), including its first three
+    ordinary candidates. Categories are 0: all equal, 1: one equal pair,
+    and 2: all distinct.
+    """
+    baseline = np.asarray(baseline, dtype=bool)
+    if baseline.ndim != 2 or baseline.shape[0] != 3:
+        raise ValueError("baseline must have three original-DEM corrections")
+    equal_pairs = [
+        (i, j) for i, j in ((0, 1), (0, 2), (1, 2))
+        if np.array_equal(baseline[i], baseline[j])
+    ]
+    if len(equal_pairs) == 3:
+        return 0, ()
+    if not equal_pairs:
+        return 2, tuple(range(3, 12))
+    duplicate = equal_pairs[0]
+    singleton = next(i for i in range(3) if i not in duplicate)
+    representative = duplicate[0]
+    specs = candidate_specs()
+    chosen = []
+    for target in range(3):
+        guide = representative if target == singleton else singleton
+        chosen.append(next(i for i, spec in enumerate(specs)
+                           if spec.target_color == COLORS[target]
+                           and spec.guide_colors == (COLORS[guide],)))
+    return 1, tuple(sorted(chosen))
+
+
 def align_stage2_to_base(native: np.ndarray, temporary: DemDecomp,
                          base: DemDecomp) -> tuple[np.ndarray, np.ndarray]:
     """Map a rebuilt stage-2 correction to original and base-stage-2 order."""

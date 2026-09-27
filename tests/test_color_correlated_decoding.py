@@ -5,16 +5,17 @@ import pytest
 
 from color_code_stim import ColorCode
 from color_code_stim.decoders.color_correlated_decoding import (
-    ColorCorrelatedPriorReweighter, candidate_specs, guide_union,
+    ColorCorrelatedPriorReweighter, candidate_schedule, candidate_specs, guide_union,
 )
 from color_code_stim.noise_model import NoiseModel
 from color_code_stim.stim_utils import dem_to_parity_check
 
 
-def code(*, comparative=False, enabled=True, weight_basis="stage2"):
+def code(*, comparative=False, enabled=True, weight_basis="stage2", uniform=False):
     return ColorCode(
-        d=3, rounds=1, circuit_type="tri", cnot_schedule="tri_optimal",
-        noise_model=NoiseModel(bitflip=.05), comparative_decoding=comparative,
+        d=3, rounds=3 if uniform else 1, circuit_type="tri", cnot_schedule="tri_optimal",
+        noise_model=NoiseModel.uniform_circuit_noise(.02) if uniform else NoiseModel(bitflip=.05),
+        comparative_decoding=comparative,
         enable_colorcorrelated_decoding=enabled,
         color_correlated_weight_basis=weight_basis,
     )
@@ -55,6 +56,47 @@ def test_guide_union_and_source_validation():
         rw.source_probabilities(np.array([True]))
 
 
+def test_candidate_schedule_in_original_dem_order():
+    r = np.array([1, 0, 0], dtype=bool)
+    g = np.array([0, 1, 0], dtype=bool)
+    b = np.array([0, 0, 1], dtype=bool)
+    assert candidate_schedule(np.array([r, r, r])) == (0, ())
+    assert candidate_schedule(np.array([r, r, b])) == (1, (4, 7, 9))
+    assert candidate_schedule(np.array([r, g, r])) == (1, (3, 6, 10))
+    assert candidate_schedule(np.array([r, g, g])) == (1, (3, 6, 9))
+    assert candidate_schedule(np.array([r, g, b])) == (2, tuple(range(3, 12)))
+
+
+def test_uniform_shots_execute_only_scheduled_candidates(monkeypatch):
+    cc = code(uniform=True)
+    shots, _ = cc.sample(96, seed=51)
+    calls = []
+    original = ColorCorrelatedPriorReweighter.decomposition
+
+    def counted(self, color, guide):
+        calls.append(color)
+        return original(self, color, guide)
+
+    monkeypatch.setattr(ColorCorrelatedPriorReweighter, "decomposition", counted)
+    _, out = cc.decode(shots, full_output=True, check_validity=True)
+    assert out["validity"].all()
+    assert set(out["color_correlated_run"]) == {0, 1, 2}
+    executed = out["candidate_executed"]
+    expected_count = np.array([3, 6, 12])
+    np.testing.assert_array_equal(executed.sum(axis=1)[0],
+                                  expected_count[out["color_correlated_run"]])
+    assert len(calls) == sum((0, 3, 9)[category] for category in out["color_correlated_run"])
+    assert np.isfinite(out["candidate_weights"][executed]).all()
+    assert np.isposinf(out["candidate_weights"][~executed]).all()
+    for shot, category in enumerate(out["color_correlated_run"]):
+        if category == 0:
+            assert not executed[0, 3:, shot].any()
+        elif category == 1:
+            assert executed[0, 3:, shot].sum() == 3
+        else:
+            assert executed[0, 3:, shot].all()
+
+
 @pytest.mark.parametrize("comparative", [False, True])
 def test_candidates_validity_and_class_gap(comparative):
     old, new = code(comparative=comparative, enabled=False), code(comparative=comparative)
@@ -82,20 +124,30 @@ def test_candidates_validity_and_class_gap(comparative):
                   for i in out["best_candidate_indices"]]),
     )
     np.testing.assert_allclose(out["weights"], np.min(out["candidate_weights"], axis=(0, 1)))
+    assert np.all(out["color_correlated_run"] == 0)
+    assert np.all(out["candidate_executed"][:, :3, :])
+    if not comparative:
+        assert not np.any(out["candidate_executed"][:, 3:, :])
     for cls, natives in enumerate(out["candidate_native_stage2_preds"]):
         for j, native in enumerate(natives):
+            executed = out["candidate_executed"][cls, j]
+            if native is None:
+                assert not executed.any()
+                assert np.isposinf(out["candidate_weights"][cls, j]).all()
+                continue
             c = out["candidate_target_colors"][j]
             p = new.dems_decomposed[c].probs[1]
             llr = np.log((1 - p) / p)
-            np.testing.assert_allclose(out["candidate_weights"][cls, j], native @ llr)
+            np.testing.assert_allclose(out["candidate_weights"][cls, j, executed],
+                                       native[executed] @ llr)
     if comparative:
         minima = np.min(out["candidate_weights"], axis=1)
         np.testing.assert_allclose(out["logical_gaps"], np.abs(minima[0] - minima[1]))
 
 
 def test_selection_ignores_generation_weights(monkeypatch):
-    cc = code()
-    shots, _ = cc.sample(16, seed=593)
+    cc = code(uniform=True)
+    shots, _ = cc.sample(48, seed=51)
     decoder = cc.concat_matching_decoder
     original = decoder._decode_stage2
 
@@ -109,6 +161,7 @@ def test_selection_ignores_generation_weights(monkeypatch):
     monkeypatch.setattr(decoder, "_decode_stage2", inverted_generation)
     _, out = cc.decode(shots, full_output=True)
     np.testing.assert_allclose(out["weights"], out["candidate_weights"].min(axis=(0, 1)))
+    assert np.any(out["candidate_executed"][:, 3:, :])
     assert np.any(out["candidate_weights"].argmin(axis=1) !=
                   out["candidate_generation_weights"].argmin(axis=1))
 
@@ -123,9 +176,14 @@ def test_original_dem_basis_scores_mapped_corrections(comparative):
     llr = np.log((1 - q) / q)
     for cls, natives in enumerate(out["candidate_native_stage2_preds"]):
         for j, native in enumerate(natives):
+            executed = out["candidate_executed"][cls, j]
+            if native is None:
+                assert not executed.any()
+                continue
             decomp = cc.dems_decomposed[out["candidate_target_colors"][j]]
             mapped = decomp.map_errors_to_org_dem(native, stage=2)
-            np.testing.assert_allclose(out["candidate_weights"][cls, j], mapped @ llr)
+            np.testing.assert_allclose(out["candidate_weights"][cls, j, executed],
+                                       mapped[executed] @ llr)
     np.testing.assert_allclose(out["weights"], out["candidate_weights"].min(axis=(0, 1)))
     if comparative:
         minima = out["candidate_weights"].min(axis=1)
@@ -163,7 +221,10 @@ def test_erasure_predecoding_only_expands_remaining_samples(partial):
     assert np.any(success) and np.any(~success)
     assert out["candidate_weights"].shape == (2, 12, len(shots))
     assert np.isnan(out["candidate_weights"][:, :, success]).all()
-    assert np.isfinite(out["candidate_weights"][:, :, ~success]).all()
+    assert np.isfinite(out["candidate_weights"][out["candidate_executed"]]).all()
+    assert np.isposinf(out["candidate_weights"][:, :, ~success]
+                       [~out["candidate_executed"][:, :, ~success]]).all()
+    assert np.all(out["color_correlated_run"][success] == -1)
     np.testing.assert_array_equal(out["best_candidate_indices"][success], -1)
     for c in "rgb":
         for current, original in zip(cc.dems_decomposed[c].probs, before[c]):
