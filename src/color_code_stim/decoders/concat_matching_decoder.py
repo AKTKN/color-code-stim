@@ -12,6 +12,9 @@ import numpy as np
 import pymatching
 
 from .base import BaseDecoder
+from .color_correlated_decoding import (
+    ColorCorrelatedPriorReweighter, candidate_specs, guide_union,
+)
 from ..config import COLOR_LABEL, color_to_color_val
 from ..dem_utils.dem_manager import DemManager
 from ..utils import _get_final_predictions
@@ -44,11 +47,15 @@ class ConcatMatchingDecoder(BaseDecoder):
         Number of observables
     comparative_decoding : bool
         Whether comparative decoding is enabled
+    enable_colorcorrelated_decoding : bool
+        Whether to generate nine additional source-guided candidates. Each
+        candidate is selected using the unmodified stage-2 prior.
     """
 
     def __init__(
         self,
         dem_manager: DemManager,
+        enable_colorcorrelated_decoding: bool = False,
     ):
         """
         Initialize the concatenated matching decoder.
@@ -57,12 +64,17 @@ class ConcatMatchingDecoder(BaseDecoder):
         ----------
         dem_manager : DEMManager
             Manager providing access to decomposed DEMs and matrices
+        enable_colorcorrelated_decoding : bool, default False
+            Run three baseline and nine color-correlated candidates per logical
+            class. BP/custom DEM and matching-growth swim combinations are not
+            supported.
         """
         self._swim_backends = {}
         self.dem_manager = dem_manager
         self.circuit_type = dem_manager.circuit_type
         self.num_obs = dem_manager.circuit.num_observables
         self.comparative_decoding = dem_manager.comparative_decoding
+        self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
 
     def supports_comparative_decoding(self) -> bool:
         """Return True - this decoder supports comparative decoding."""
@@ -115,6 +127,9 @@ class ConcatMatchingDecoder(BaseDecoder):
             Custom DEM matrices and probabilities for BP predecoding.
             Format: {color: ((H1, p1), (H2, p2))} where H1,H2 are parity check
             matrices and p1,p2 are probability arrays for stages 1 and 2.
+        compute_swim_distance : bool, default False
+            Matching-growth soft output; incompatible with color-correlated
+            decoding because its matching state would describe another graph.
         **kwargs
             Additional parameters (for compatibility).
 
@@ -124,6 +139,15 @@ class ConcatMatchingDecoder(BaseDecoder):
             If full_output is False: predicted observables as bool array.
             If full_output is True: tuple of (predictions, extra_outputs_dict).
         """
+        if self.enable_colorcorrelated_decoding:
+            if custom_dem_data is not None:
+                raise NotImplementedError(
+                    "Color-correlated decoding with custom_dem_data/BP is not supported"
+                )
+            if compute_swim_distance:
+                raise NotImplementedError(
+                    "Color-correlated decoding with matching-growth swim output is not supported"
+                )
         if compute_swim_distance:
             if custom_dem_data is not None:
                 raise NotImplementedError("Swim output with custom_dem_data is not supported")
@@ -148,6 +172,15 @@ class ConcatMatchingDecoder(BaseDecoder):
             colors = ["r", "g", "b"]
         elif colors in ["r", "g", "b"]:
             colors = [colors]
+
+        if self.enable_colorcorrelated_decoding and (
+            len(colors) != 3 or set(colors) != {"r", "g", "b"}
+        ):
+            raise ValueError("Color-correlated decoding requires all three colors r, g, b")
+        if self.enable_colorcorrelated_decoding:
+            colors = ["r", "g", "b"]
+            specs = candidate_specs()
+            reweighter = ColorCorrelatedPriorReweighter(self.dem_manager)
 
         if compute_swim_distance and detector_outcomes.shape[0] == 0:
             result = np.empty((0,) if self.num_obs == 1 else (0,self.num_obs), dtype=bool)
@@ -255,18 +288,24 @@ class ConcatMatchingDecoder(BaseDecoder):
             print("Second-round decoding:")
 
         num_left_samples = detector_outcomes_left.shape[0]
+        if self.enable_colorcorrelated_decoding:
+            candidate_weights = np.full((num_logical_classes, 12, num_left_samples), np.nan)
+            generation_weights = np.full_like(candidate_weights, np.nan)
+            best_candidate_indices = np.full(num_left_samples, -1, dtype=int)
+            native_candidate_preds = [[None] * 12 for _ in range(num_logical_classes)]
 
         if num_left_samples > 0 and not (
             erasure_matcher_predecoding and partial_correction_by_predecoding
         ):
             num_errors = self.dem_manager.H.shape[1]
 
+            num_candidates = 12 if self.enable_colorcorrelated_decoding else len(colors)
             error_preds = np.empty(
-                (num_logical_classes, len(colors), num_left_samples, num_errors),
+                (num_logical_classes, num_candidates, num_left_samples, num_errors),
                 dtype=bool,
             )
             weights = np.empty(
-                (num_logical_classes, len(colors), num_left_samples), dtype=float
+                (num_logical_classes, num_candidates, num_left_samples), dtype=float
             )
 
             if compute_swim_distance:
@@ -305,6 +344,14 @@ class ConcatMatchingDecoder(BaseDecoder):
                         else:
                             error_preds_new, weights_new = stage2_result
 
+                    # Preserve native stage-2 columns for common-prior rescoring.
+                    if self.enable_colorcorrelated_decoding:
+                        native_candidate_preds[i][i_c] = error_preds_new.copy()
+                        base_p = self.dem_manager.dems_decomposed[c].probs[1]
+                        base_llr = np.log((1 - base_p) / base_p)
+                        generation_weights[i, i_c] = weights_new
+                        weights_new = error_preds_new.astype(float) @ base_llr
+
                     # Map errors back to original DEM ordering
                     error_preds_new = self.dem_manager.dems_decomposed[
                         c
@@ -313,10 +360,52 @@ class ConcatMatchingDecoder(BaseDecoder):
                     error_preds[i, i_c, :, :] = error_preds_new
                     weights[i, i_c, :] = weights_new
 
+                if self.enable_colorcorrelated_decoding:
+                    # Guides are the three baseline original-DEM corrections of
+                    # this logical class. The two-guide case is Boolean union.
+                    guides = {c: error_preds[i, j] for j, c in enumerate(colors)}
+                    for i_spec, spec in enumerate(specs[3:], start=3):
+                        c = spec.target_color
+                        base_p = self.dem_manager.dems_decomposed[c].probs[1]
+                        base_llr = np.log((1 - base_p) / base_p)
+                        for shot in range(num_left_samples):
+                            guide = guide_union(
+                                {name: correction[shot] for name, correction in guides.items()},
+                                spec.guide_colors,
+                            )
+                            p1, p2 = reweighter.probabilities(c, guide)
+                            decomp = self.dem_manager.dems_decomposed[c]
+                            temporary_dem = {c: ((decomp.Hs[0], p1), (decomp.Hs[1], p2))}
+                            det = detector_outcomes_left[shot:shot + 1].copy()
+                            if self.comparative_decoding:
+                                det[:, -self.num_obs:] = (
+                                    logical_value if logical_value is not None
+                                    else all_logical_values[i]
+                                )
+                            stage1 = self._decode_stage1(det, c, temporary_dem)
+                            native, generation_weight = self._decode_stage2(
+                                det, stage1, c, temporary_dem
+                            )
+                            if native_candidate_preds[i][i_spec] is None:
+                                native_candidate_preds[i][i_spec] = np.empty(
+                                    (num_left_samples, native.shape[1]), dtype=native.dtype
+                                )
+                            native_candidate_preds[i][i_spec][shot] = native[0]
+                            error_preds[i, i_spec, shot] = decomp.map_errors_to_org_dem(
+                                native[0], stage=2
+                            )
+                            generation_weights[i, i_spec, shot] = generation_weight[0]
+                            weights[i, i_spec, shot] = native[0].astype(float) @ base_llr
+
+            if self.enable_colorcorrelated_decoding:
+                candidate_weights = weights.copy()
+
             # Find best predictions across logical classes and colors
             best_logical_classes, best_color_inds, weights_final, logical_gaps = (
                 _get_final_predictions(weights)
             )
+            if self.enable_colorcorrelated_decoding:
+                best_candidate_indices = best_color_inds.copy()
 
             error_preds_final = error_preds[
                 best_logical_classes, best_color_inds, np.arange(num_left_samples), :
@@ -334,13 +423,20 @@ class ConcatMatchingDecoder(BaseDecoder):
                 obs_preds_final = np.empty((num_left_samples, self.num_obs), dtype=bool)
                 for i_c, c in enumerate(colors):
                     obs_matrix = self.dem_manager.obs_matrix
-                    mask = best_color_inds == i_c
+                    if self.enable_colorcorrelated_decoding:
+                        mask = np.array([spec.target_color == c for spec in specs])[best_color_inds]
+                    else:
+                        mask = best_color_inds == i_c
                     obs_preds_final[mask, :] = (
                         (error_preds_final[mask, :].astype("uint8") @ obs_matrix.T) % 2
                     ).astype(bool)
 
             # Adjust color indices for non-standard color selections
-            if colors == ["r", "g", "b"]:
+            if self.enable_colorcorrelated_decoding:
+                best_colors = np.array([
+                    color_to_color_val(spec.target_color) for spec in specs
+                ], dtype=np.uint8)[best_color_inds]
+            elif colors == ["r", "g", "b"]:
                 best_colors = best_color_inds
             else:
                 best_colors = np.array([color_to_color_val(c) for c in colors])[
@@ -384,6 +480,11 @@ class ConcatMatchingDecoder(BaseDecoder):
                 best_colors = extra_outputs["best_colors"]
                 weights_final = extra_outputs["weights"]
                 logical_gaps = extra_outputs["logical_gaps"]
+                if self.enable_colorcorrelated_decoding:
+                    best_candidate_indices = extra_outputs["best_candidate_indices"]
+                    candidate_weights = extra_outputs["candidate_weights"]
+                    generation_weights = extra_outputs["candidate_generation_weights"]
+                    native_candidate_preds = extra_outputs["candidate_native_stage2_preds"]
 
         else:
             # No samples to decode
@@ -425,6 +526,18 @@ class ConcatMatchingDecoder(BaseDecoder):
                 weights_final = full_weights_final
                 logical_gaps = full_logical_gaps
                 error_preds_final = full_error_preds_final
+                if self.enable_colorcorrelated_decoding:
+                    full_best_candidate_indices = np.full(detector_outcomes.shape[0], -1, dtype=int)
+                    full_best_candidate_indices[predecoding_failure] = best_candidate_indices
+                    best_candidate_indices = full_best_candidate_indices
+                    full_candidate_weights = np.full(
+                        (num_logical_classes, 12, detector_outcomes.shape[0]), np.nan
+                    )
+                    full_generation_weights = full_candidate_weights.copy()
+                    full_candidate_weights[:, :, predecoding_failure] = candidate_weights
+                    full_generation_weights[:, :, predecoding_failure] = generation_weights
+                    candidate_weights = full_candidate_weights
+                    generation_weights = full_generation_weights
 
         # Validity checking
         if check_validity:
@@ -448,6 +561,15 @@ class ConcatMatchingDecoder(BaseDecoder):
                 "weights": weights_final,
                 "error_preds": error_preds_final,
             }
+            if self.enable_colorcorrelated_decoding:
+                extra_outputs.update(
+                    candidate_labels=tuple(spec.label for spec in specs),
+                    candidate_target_colors=tuple(spec.target_color for spec in specs),
+                    best_candidate_indices=best_candidate_indices,
+                    candidate_weights=candidate_weights,
+                    candidate_generation_weights=generation_weights,
+                    candidate_native_stage2_preds=native_candidate_preds,
+                )
 
             if compute_swim_distance:
                 from ..soft_output.results import GROWTH_CONVENTION

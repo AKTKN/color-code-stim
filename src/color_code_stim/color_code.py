@@ -73,6 +73,7 @@ class ColorCode:
         Literal["bitflip", "reset", "meas", "cnot", "idle", "cult"], float
     ]
     comparative_decoding: bool
+    enable_colorcorrelated_decoding: bool
     exclude_non_essential_pauli_detectors: bool
     cultivation_circuit: Optional[stim.Circuit]
     remove_non_edge_like_errors: bool
@@ -100,6 +101,7 @@ class ColorCode:
         perfect_init_final: bool = False,
         perfect_first_syndrome_extraction: bool = False,
         comparative_decoding: bool = False,
+        enable_colorcorrelated_decoding: bool = False,
         exclude_non_essential_pauli_detectors: bool = False,
         cultivation_circuit: Optional[stim.Circuit] = None,
         remove_non_edge_like_errors: bool = True,
@@ -215,6 +217,11 @@ class ColorCode:
             decoder for each logical class and choosing the lowest-weight one. This also
             provides the logical gap information, which quantifies the reliability of
             decoding.
+        enable_colorcorrelated_decoding : bool, default False
+            Generate nine additional color-guided two-stage candidates and select
+            among all twelve using the original monochromatic stage-2 prior.
+            Requires all three colors and is incompatible with BP predecoding
+            and matching-growth swim output.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -389,6 +396,7 @@ class ColorCode:
         self.perfect_first_syndrome_extraction = perfect_first_syndrome_extraction
 
         self.comparative_decoding = comparative_decoding
+        self.enable_colorcorrelated_decoding = enable_colorcorrelated_decoding
 
         self.exclude_non_essential_pauli_detectors = (
             exclude_non_essential_pauli_detectors
@@ -528,6 +536,7 @@ class ColorCode:
         if self._concat_matching_decoder is None:
             self._concat_matching_decoder = ConcatMatchingDecoder(
                 dem_manager=self.dem_manager,
+                enable_colorcorrelated_decoding=self.enable_colorcorrelated_decoding,
             )
         return self._concat_matching_decoder
 
@@ -956,6 +965,8 @@ class ColorCode:
         extra_outputs : dict, only when full_output is True
             Dictionary containing additional decoding outputs.
         """
+        if self.enable_colorcorrelated_decoding and bp_predecoding:
+            raise NotImplementedError("Color-correlated decoding with BP predecoding is not supported")
         if compute_swim_distance and bp_predecoding:
             raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
@@ -1260,6 +1271,9 @@ class ColorCode:
         # Create a new instance without calling __init__
         instance = cls.__new__(cls)
         instance.__dict__.update(data)
+        instance.enable_colorcorrelated_decoding = data.get(
+            "enable_colorcorrelated_decoding", False
+        )
 
         # Reconstruct non-picklable attributes in the correct order
         try:

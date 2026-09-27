@@ -23,6 +23,29 @@ Set `superdense_circuit=True` when initializing a `ColorCode` instance. By defau
 By setting `comparative_decoding=True` (default is `False`) when defining a `ColorCode` object, the concatenated MWPM decoder can be executed multiple times over all distinct logical classes. The minimum-weight correction is chosen as the final correction, and the resulting **logical gap** quantifies its reliability, which can be used for post-selection. This feature was not discussed in our original [paper](https://doi.org/10.22331/q-2025-01-27-1609) but has been added for our following [paper](https://arxiv.org/abs/2409.07707) on color code magic state distillation.
 - **Easy Monte-Carlo simulation to evaluate the decoder performance.** <br>
 
+### Color-correlated concatenated decoding
+
+Set `enable_colorcorrelated_decoding=True` on `ColorCode` to generate the three
+ordinary color candidates plus nine source-guided candidates per logical class:
+
+```python
+code = ColorCode(d=3, rounds=1, p_bitflip=0.05,
+                 enable_colorcorrelated_decoding=True)
+predictions, details = code.decode(detector_outcomes, full_output=True)
+```
+
+Each target color is decoded again using either other color as a guide, then
+their Boolean OR as a guide. Both matching stages use temporary reweighted
+priors. All twelve candidates are compared using the original stage-2 prior,
+since their generation weights come from different priors. `details` includes
+`candidate_labels`, `candidate_weights`, `best_candidate_indices`, the selected
+`weights`, `best_colors`, and original-DEM `error_preds`. Comparative decoding
+computes its logical gap from each class's minimum over twelve candidates.
+
+This option requires all three colors and unit-multiplicity source provenance.
+It currently cannot be combined with BP/custom DEM priors or matching-growth
+swim output. The default remains the ordinary three-candidate decoder.
+
 ## Project Structure
 
 ```
