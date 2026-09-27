@@ -338,8 +338,12 @@ def test_unsupported_options_and_colorcode_persistence(tmp_path):
         cc.decode(shots, colors=["r", "g"])
     with pytest.raises(NotImplementedError, match="custom_dem_data"):
         cc.concat_matching_decoder.decode(shots, custom_dem_data={})
-    with pytest.raises(NotImplementedError, match="swim"):
-        cc.decode(shots, compute_swim_distance=True)
+    hard = cc.decode(shots)
+    scored_hard, scored = cc.decode(shots, compute_swim_distance=True, full_output=True)
+    np.testing.assert_array_equal(hard, scored_hard)
+    assert np.isfinite(scored["selected_swim_distance"]).all()
+    assert np.all(scored["class_min_swim_distance"] <=
+                  scored["selected_swim_distance"] + 1e-12)
     with pytest.raises(NotImplementedError, match="BP"):
         cc.decode(shots, bp_predecoding=True)
     path = tmp_path / "color_code.pkl"

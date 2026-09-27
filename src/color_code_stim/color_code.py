@@ -959,6 +959,7 @@ class ColorCode:
         check_validity: bool = False,
         verbose: bool = False,
         compute_swim_distance: bool = False,
+        return_candidate_data: bool = False,
     ) -> np.ndarray | Tuple[np.ndarray, dict]:
         """
         Decode detector outcomes using concatenated MWPM decoding.
@@ -1002,6 +1003,10 @@ class ColorCode:
             the Phase-2A PyMatching fork. Only single-round data-only X noise
             with triangular Z memory is validated. No full-decoder gap or
             certified representative bound is asserted.
+        return_candidate_data : bool, default False
+            Include generated stage-1 hypotheses, mapped corrections and
+            candidate validity in full_output for an external circuit-level
+            soft-output scorer. Hard selection is unchanged.
 
         Returns
         -------
@@ -1038,6 +1043,7 @@ class ColorCode:
         # Delegate to ConcatMatchingDecoder for standard decoding
         return self.concat_matching_decoder.decode(
             compute_swim_distance=compute_swim_distance,
+            return_candidate_data=return_candidate_data,
             detector_outcomes=detector_outcomes,
             colors=colors,
             logical_value=logical_value,

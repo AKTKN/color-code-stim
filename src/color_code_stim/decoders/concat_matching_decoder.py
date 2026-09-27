@@ -156,6 +156,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         verbose: bool = False,
         custom_dem_data: Optional[Dict[str, Tuple[Tuple, Tuple]]] = None,
         compute_swim_distance: bool = False,
+        return_candidate_data: bool = False,
         **kwargs,
     ) -> Union[np.ndarray, Tuple[np.ndarray, dict]]:
         """
@@ -188,8 +189,12 @@ class ConcatMatchingDecoder(BaseDecoder):
             Format: {color: ((H1, p1), (H2, p2))} where H1,H2 are parity check
             matrices and p1,p2 are probability arrays for stages 1 and 2.
         compute_swim_distance : bool, default False
-            Matching-growth soft output; incompatible with color-correlated
-            decoding because its matching state would describe another graph.
+            Spatial matching-growth soft output for single-round triangular
+            data-only X noise. Ensemble hypotheses are scored on the
+            unmodified base-prior stage-2 graph.
+        return_candidate_data : bool, default False
+            Export generated candidate hypotheses and corrections for an
+            external scorer without changing hard decoding.
         **kwargs
             Additional parameters (for compatibility).
 
@@ -199,15 +204,22 @@ class ConcatMatchingDecoder(BaseDecoder):
             If full_output is False: predicted observables as bool array.
             If full_output is True: tuple of (predictions, extra_outputs_dict).
         """
+        if compute_swim_distance:
+            if custom_dem_data is not None:
+                raise NotImplementedError("Swim output with custom_dem_data is not supported")
+            if erasure_matcher_predecoding or partial_correction_by_predecoding or self.comparative_decoding:
+                raise NotImplementedError("Swim output is not validated for predecoding or comparative DEMs")
+            if not self.dem_manager.swim_data_only:
+                raise NotImplementedError("Swim requires single-round triangular data-only X noise; unresolved boundaries are UNCLASSIFIED")
+
         if self.enable_prior_perturbation:
             if custom_dem_data is not None:
                 raise NotImplementedError("Prior perturbation with BP/custom DEM priors is unsupported")
-            if compute_swim_distance:
-                raise NotImplementedError("Prior perturbation with matching-growth swim output is unsupported")
             if erasure_matcher_predecoding or partial_correction_by_predecoding:
                 raise NotImplementedError("Prior perturbation with erasure predecoding is unsupported")
             return self._decode_prior_perturbation(
-                detector_outcomes, colors, logical_value, full_output, check_validity
+                detector_outcomes, colors, logical_value, full_output, check_validity,
+                compute_swim_distance,
             )
         if self.enable_cross_color_relifting:
             if self.dem_manager.remove_non_edge_like_errors:
@@ -216,29 +228,17 @@ class ConcatMatchingDecoder(BaseDecoder):
                 raise NotImplementedError("Cross-color relifting and color-correlated decoding cannot be combined")
             if custom_dem_data is not None:
                 raise NotImplementedError("Cross-color relifting with BP/custom DEM priors is unsupported")
-            if compute_swim_distance:
-                raise NotImplementedError("Cross-color relifting with matching-growth swim output is unsupported")
             if erasure_matcher_predecoding or partial_correction_by_predecoding:
                 raise NotImplementedError("Cross-color relifting with predecoding ensembles is unsupported")
             return self._decode_cross_color_relifting(
-                detector_outcomes, colors, logical_value, full_output, check_validity
+                detector_outcomes, colors, logical_value, full_output, check_validity,
+                compute_swim_distance, return_candidate_data,
             )
         if self.enable_colorcorrelated_decoding:
             if custom_dem_data is not None:
                 raise NotImplementedError(
                     "Color-correlated decoding with custom_dem_data/BP is not supported"
                 )
-            if compute_swim_distance:
-                raise NotImplementedError(
-                    "Color-correlated decoding with matching-growth swim output is not supported"
-                )
-        if compute_swim_distance:
-            if custom_dem_data is not None:
-                raise NotImplementedError("Swim output with custom_dem_data is not supported")
-            if erasure_matcher_predecoding or partial_correction_by_predecoding or self.comparative_decoding:
-                raise NotImplementedError("Swim output is not validated for predecoding or comparative DEMs")
-            if not self.dem_manager.swim_data_only:
-                raise NotImplementedError("Swim requires single-round triangular data-only X noise; unresolved boundaries are UNCLASSIFIED")
 
         if erasure_matcher_predecoding:
             if not self.comparative_decoding:
@@ -388,6 +388,8 @@ class ConcatMatchingDecoder(BaseDecoder):
             color_correlated_run = np.full(num_left_samples, -1, dtype=np.int8)
             best_candidate_indices = np.full(num_left_samples, -1, dtype=int)
             native_candidate_preds = [[None] * 12 for _ in range(num_logical_classes)]
+            if compute_swim_distance or return_candidate_data:
+                candidate_stage1_hypotheses = [[None] * 12 for _ in range(num_logical_classes)]
 
         if num_left_samples > 0 and not (
             erasure_matcher_predecoding and partial_correction_by_predecoding
@@ -456,6 +458,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                          generation_weight) = evaluator.evaluate(
                             c, error_preds_new, weights_new
                         )
+                        if compute_swim_distance or return_candidate_data:
+                            candidate_stage1_hypotheses[i][i_c] = error_preds_stage1_left[i][c]
                         native_candidate_preds[i][i_c] = base_native
                         generation_weights[i, i_c] = generation_weight
                     elif self.color_correlated_weight_basis == "original_dem":
@@ -505,6 +509,11 @@ class ConcatMatchingDecoder(BaseDecoder):
                                     else all_logical_values[i]
                                 )
                             stage1 = self._decode_stage1(det, c, temporary_dem)
+                            if compute_swim_distance or return_candidate_data:
+                                if candidate_stage1_hypotheses[i][i_spec] is None:
+                                    candidate_stage1_hypotheses[i][i_spec] = np.zeros(
+                                        (num_left_samples, stage1.shape[1]), dtype=bool)
+                                candidate_stage1_hypotheses[i][i_spec][shot] = stage1[0]
                             native, generation_weight = self._decode_stage2(
                                 det, stage1, c
                             )
@@ -558,6 +567,29 @@ class ConcatMatchingDecoder(BaseDecoder):
                     obs_preds_final[mask, :] = (
                         (error_preds_final[mask, :].astype("uint8") @ obs_matrix.T) % 2
                     ).astype(bool)
+
+            if compute_swim_distance:
+                if self.enable_colorcorrelated_decoding:
+                    candidate_swim, class_min_swim = self._score_candidate_swim(
+                        detector_outcomes_left, error_preds,
+                        candidate_stage1_hypotheses,
+                        tuple(spec.target_color for spec in specs),
+                        obs_preds_final, candidate_executed,
+                    )
+                else:
+                    # All ordinary branches use the unchanged stage-2 prior.
+                    flat = error_preds[0].reshape(-1, error_preds.shape[-1])
+                    candidate_observables = np.asarray(
+                        (flat.astype(np.uint8) @ self.dem_manager.obs_matrix.T) % 2,
+                        dtype=bool,
+                    ).reshape(len(colors), num_left_samples, self.num_obs)
+                    same_class = np.all(candidate_observables == obs_preds_final[None, :, :], axis=-1)
+                    class_min_swim = np.min(np.where(same_class.T, swim_by_color, np.inf), axis=1)
+                if self.enable_colorcorrelated_decoding:
+                    selected_swim = candidate_swim[
+                        best_logical_classes, best_color_inds, np.arange(num_left_samples)]
+                else:
+                    selected_swim = swim_by_color[np.arange(num_left_samples), best_color_inds]
 
             # Adjust color indices for non-standard color selections
             if self.enable_colorcorrelated_decoding:
@@ -713,17 +745,34 @@ class ConcatMatchingDecoder(BaseDecoder):
                     candidate_generation_weights=generation_weights,
                     candidate_native_stage2_preds=native_candidate_preds,
                 )
+                if return_candidate_data:
+                    extra_outputs.update(
+                        candidate_stage1_hypotheses=candidate_stage1_hypotheses,
+                        candidate_original_corrections=error_preds,
+                        candidate_valid=candidate_executed,
+                    )
+            elif return_candidate_data:
+                extra_outputs.update(
+                    candidate_target_colors=tuple(colors),
+                    candidate_stage1_hypotheses=[
+                        [error_preds_stage1_left[i][c] for c in colors]
+                        for i in range(num_logical_classes)],
+                    candidate_original_corrections=error_preds,
+                    candidate_valid=np.ones(error_preds.shape[:3], dtype=bool),
+                )
 
             if compute_swim_distance:
                 from ..soft_output.results import GROWTH_CONVENTION
-                extra_outputs.update(
-                    color_order=tuple(colors),
-                    stage2_weights_by_color=swim_stage2_weights.copy(),
-                    swim_distances_by_color=swim_by_color,
-                    selected_swim_distance=swim_by_color[np.arange(num_left_samples),best_color_inds],
-                    swim_growth_convention=GROWTH_CONVENTION,
-                    swim_bound_certified=False,
-                )
+                extra_outputs.update(selected_swim_distance=selected_swim,
+                                     class_min_swim_distance=class_min_swim,
+                                     swim_growth_convention=GROWTH_CONVENTION,
+                                     swim_bound_certified=False)
+                if self.enable_colorcorrelated_decoding:
+                    extra_outputs["candidate_swim_distances"] = candidate_swim
+                else:
+                    extra_outputs.update(color_order=tuple(colors),
+                        stage2_weights_by_color=swim_stage2_weights.copy(),
+                        swim_distances_by_color=swim_by_color)
 
             if len(error_preds_stage1_all) > 1:
                 extra_outputs["logical_gaps"] = logical_gaps
@@ -743,8 +792,43 @@ class ConcatMatchingDecoder(BaseDecoder):
         else:
             return obs_preds_final
 
+    def _score_candidate_swim(self, detectors, mapped, hypotheses, targets,
+                              selected_observables, valid=None):
+        """Score each generated stage-2 syndrome on the unchanged base graph.
+
+        Perturbed priors may generate a candidate correction, but they never
+        enter this metric calculation. The reported score is the minimum among
+        generated candidates with the final hard decision's logical parity.
+        """
+        shots = len(detectors)
+        scores = np.full(mapped.shape[:3], np.inf, dtype=float)
+        if valid is None:
+            valid = np.ones(scores.shape, dtype=bool)
+        for logical_class in range(mapped.shape[0]):
+            for slot, color in enumerate(targets):
+                hypothesis = hypotheses[logical_class][slot]
+                active = valid[logical_class, slot]
+                if hypothesis is None or not np.any(active):
+                    continue
+                result = self._decode_stage2(
+                    detectors[active], np.asarray(hypothesis, dtype=bool)[active],
+                    color, compute_swim_distance=True,
+                )
+                scores[logical_class, slot, active] = result.swim_distances
+        flat = mapped.reshape(-1, mapped.shape[-1])
+        observable = np.asarray(
+            (flat.astype(np.uint8) @ self.dem_manager.obs_matrix.T) % 2,
+            dtype=bool,
+        ).reshape(mapped.shape[:3] + (self.num_obs,))
+        same = np.all(observable == selected_observables[None, None, :, :], axis=-1)
+        selected = np.min(np.where(same & valid, scores, np.inf), axis=(0, 1))
+        if selected.shape != (shots,) or not np.isfinite(selected).all():
+            raise RuntimeError("No finite same-logical-class swim candidate")
+        return scores, selected
+
     def _decode_prior_perturbation(
-        self, detector_outcomes, colors, logical_value, full_output, check_validity
+        self, detector_outcomes, colors, logical_value, full_output, check_validity,
+        compute_swim_distance=False,
     ):
         """Run each fixed common-DEM ensemble member for all three colors."""
         if colors != "all" and colors != ["r", "g", "b"]:
@@ -819,6 +903,12 @@ class ConcatMatchingDecoder(BaseDecoder):
             best_colors = np.zeros(0, dtype=np.uint8)
             gaps = None
         output = observed.ravel() if self.num_obs == 1 else observed
+        if compute_swim_distance:
+            from ..soft_output.results import GROWTH_CONVENTION
+            candidate_swim, class_min_swim = self._score_candidate_swim(
+                detector_outcomes, mapped, stage1_hypotheses, targets, observed)
+            selected_swim = candidate_swim[
+                best_class, best_slot, np.arange(n_shots)]
         if not full_output:
             return output
         extra = dict(
@@ -834,6 +924,12 @@ class ConcatMatchingDecoder(BaseDecoder):
             candidate_stage1_hypotheses=stage1_hypotheses,
             candidate_original_corrections=mapped,
         )
+        if compute_swim_distance:
+            extra.update(candidate_swim_distances=candidate_swim,
+                         selected_swim_distance=selected_swim,
+                         class_min_swim_distance=class_min_swim,
+                         swim_growth_convention=GROWTH_CONVENTION,
+                         swim_bound_certified=False)
         if gaps is not None:
             extra.update(logical_gaps=gaps, logical_values=np.asarray(
                 list(itertools.product((False, True), repeat=self.num_obs))))
@@ -845,7 +941,8 @@ class ConcatMatchingDecoder(BaseDecoder):
         return output, extra
 
     def _decode_cross_color_relifting(
-        self, detector_outcomes, colors, logical_value, full_output, check_validity
+        self, detector_outcomes, colors, logical_value, full_output, check_validity,
+        compute_swim_distance=False, return_candidate_data=False,
     ):
         """Decode canonical relift slots with class-local syndrome caching."""
         if colors != "all" and colors != ["r", "g", "b"]:
@@ -877,6 +974,8 @@ class ConcatMatchingDecoder(BaseDecoder):
         n_classes, n_shots, n_errors = len(logical_classes), len(detector_outcomes), manager.H.shape[1]
         mapped = np.zeros((n_classes, 12, n_shots, n_errors), dtype=bool)
         native = [[None] * 12 for _ in range(n_classes)]
+        if compute_swim_distance or return_candidate_data:
+            stage1_hypotheses = [[None] * 12 for _ in range(n_classes)]
         weights = np.full((n_classes, 12, n_shots), np.inf)
         generations = np.full_like(weights, np.nan)
         validity = np.zeros_like(weights, dtype=bool)
@@ -888,7 +987,8 @@ class ConcatMatchingDecoder(BaseDecoder):
         cache_skips = np.zeros((n_classes, n_shots), dtype=np.int8)
         evaluator = CandidateEvaluator(manager, self.color_correlated_weight_basis)
 
-        def store(class_index, slot, shot, result, did_execute=False, alias_slot=-1):
+        def store(class_index, slot, shot, result, did_execute=False, alias_slot=-1,
+                  hypothesis=None):
             correction, base_native, weight, generation = result
             mapped[class_index, slot, shot] = correction
             if native[class_index][slot] is None:
@@ -899,6 +999,15 @@ class ConcatMatchingDecoder(BaseDecoder):
             validity[class_index, slot, shot] = True
             executed[class_index, slot, shot] = did_execute
             alias[class_index, slot, shot] = alias_slot
+            if compute_swim_distance or return_candidate_data:
+                if hypothesis is None and alias_slot >= 0:
+                    hypothesis = stage1_hypotheses[class_index][alias_slot][shot]
+                if hypothesis is None:
+                    raise RuntimeError("Missing stage-1 hypothesis for swim candidate")
+                if stage1_hypotheses[class_index][slot] is None:
+                    stage1_hypotheses[class_index][slot] = np.zeros(
+                        (n_shots, len(hypothesis)), dtype=bool)
+                stage1_hypotheses[class_index][slot][shot] = hypothesis
 
         for class_index, logical in enumerate(logical_classes):
             det = detector_outcomes.copy()
@@ -913,7 +1022,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                     evaluated = evaluator.evaluate(color, native_batch[shot], generation_batch[shot])
                     result = tuple(np.asarray(v).copy() for v in evaluated)
                     baseline[color] = baseline.get(color, []) + [result]
-                    store(class_index, color_index, shot, result, did_execute=True)
+                    store(class_index, color_index, shot, result, did_execute=True,
+                          hypothesis=stage1[color][shot])
             for shot in range(n_shots):
                 sources = {c: baseline[c][shot][0] for c in colors}
                 category = relift.classify(sources)
@@ -975,7 +1085,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                     evaluated = evaluator.evaluate(target, new_native[0], new_generation[0])
                     result = tuple(np.asarray(v).copy() for v in evaluated)
                     cache[key] = (slot, result)
-                    store(class_index, slot, shot, result, did_execute=True)
+                    store(class_index, slot, shot, result, did_execute=True,
+                          hypothesis=hypothesis)
                     extra_calls[class_index, shot] += 1
 
         if n_shots:
@@ -1004,6 +1115,13 @@ class ConcatMatchingDecoder(BaseDecoder):
             selected_cache_skips = np.zeros(0, dtype=np.int8)
             gaps = None
         output = observed.ravel() if self.num_obs == 1 else observed
+        if compute_swim_distance:
+            from ..soft_output.results import GROWTH_CONVENTION
+            candidate_swim, class_min_swim = self._score_candidate_swim(
+                detector_outcomes, mapped, stage1_hypotheses,
+                tuple(spec.target_color for spec in specs), observed, validity)
+            selected_swim = candidate_swim[
+                best_class, best_slot, np.arange(n_shots)]
         if not full_output:
             return output
         extra = dict(best_colors=best_colors, weights=selected_weights, error_preds=selected,
@@ -1026,6 +1144,16 @@ class ConcatMatchingDecoder(BaseDecoder):
                      relift_cache_skips_by_logical_class=cache_skips,
                      relift_run_class_by_logical_class=run_class,
                      relift_extra_stage2_calls_by_logical_class=extra_calls)
+        if compute_swim_distance:
+            extra.update(candidate_swim_distances=candidate_swim,
+                         selected_swim_distance=selected_swim,
+                         class_min_swim_distance=class_min_swim,
+                         swim_growth_convention=GROWTH_CONVENTION,
+                         swim_bound_certified=False)
+        if return_candidate_data:
+            extra.update(candidate_stage1_hypotheses=stage1_hypotheses,
+                         candidate_original_corrections=mapped,
+                         candidate_valid=validity)
         if gaps is not None:
             extra.update(logical_gaps=gaps, logical_values=np.asarray(list(itertools.product((False, True), repeat=self.num_obs))))
         if check_validity:

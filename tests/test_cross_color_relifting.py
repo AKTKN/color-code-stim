@@ -170,7 +170,7 @@ def test_incompatibilities_and_persistence(tmp_path):
     shots, _ = cc.sample(1, seed=4)
     with pytest.raises(NotImplementedError, match="BP"):
         cc.decode(shots, bp_predecoding=True)
-    with pytest.raises(NotImplementedError, match="swim"):
+    with pytest.raises(NotImplementedError, match="UNCLASSIFIED"):
         cc.decode(shots, compute_swim_distance=True)
     with pytest.raises(NotImplementedError, match="custom DEM"):
         cc.concat_matching_decoder.decode(shots, custom_dem_data={})

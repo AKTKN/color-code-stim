@@ -163,7 +163,29 @@ def test_persistence_and_incompatibilities(tmp_path):
         code(enable_cross_color_relifting=True, remove_non_edge_like_errors=False)
     with pytest.raises(NotImplementedError, match="BP"):
         cc.decode(shots, bp_predecoding=True)
-    with pytest.raises(NotImplementedError, match="swim"):
-        cc.decode(shots, compute_swim_distance=True)
+    _, scored = cc.decode(shots, compute_swim_distance=True, full_output=True)
+    assert np.isfinite(scored["selected_swim_distance"]).all()
     with pytest.raises(NotImplementedError, match="custom DEM"):
         cc.concat_matching_decoder.decode(shots, custom_dem_data={})
+
+
+def test_swim_uses_base_stage2_prior_and_selected_logical_class():
+    cc = code(size=2, alpha=.7)
+    shots, _ = cc.sample(8, seed=107)
+    hard, extra = cc.decode(shots, full_output=True, compute_swim_distance=True)
+    off = cc.decode(shots)
+    np.testing.assert_array_equal(hard, off)
+    decoder = cc.concat_matching_decoder
+    for slot, color in enumerate(extra["candidate_target_colors"]):
+        stage1 = extra["candidate_stage1_hypotheses"][0][slot]
+        direct = decoder._decode_stage2(
+            shots, stage1, color, compute_swim_distance=True)
+        np.testing.assert_array_equal(
+            direct.swim_distances, extra["candidate_swim_distances"][0, slot])
+    observable = np.asarray((extra["candidate_original_corrections"][0].astype(
+        np.uint8).reshape(-1, cc.dem_manager.H.shape[1]) @
+        cc.dem_manager.obs_matrix.T) % 2, dtype=bool).reshape(6, 8)
+    same = observable == hard[None, :]
+    expected = np.min(np.where(same, extra["candidate_swim_distances"][0], np.inf), axis=0)
+    np.testing.assert_array_equal(expected, extra["class_min_swim_distance"])
+    assert np.all(expected <= extra["selected_swim_distance"] + 1e-12)

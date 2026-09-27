@@ -66,7 +66,9 @@ def test_regression_shapes_direct_backend_and_cache(d,colors):
     _, reverse = cc.decode(shots[::-1],colors=colors,full_output=True,compute_swim_distance=True)
     np.testing.assert_array_equal(reverse['swim_distances_by_color'][::-1],on['swim_distances_by_color'])
     chosen = [on['color_order'].index('rgb'[c]) for c in on['best_colors']]
-    np.testing.assert_array_equal(on['selected_swim_distance'],on['swim_distances_by_color'][np.arange(48),chosen])
+    np.testing.assert_array_equal(on['selected_swim_distance'],
+                                  on['swim_distances_by_color'][np.arange(48), chosen])
+    assert np.all(on['class_min_swim_distance'] <= on['selected_swim_distance'] + 1e-12)
 
 
 def test_empty_and_refusals():
