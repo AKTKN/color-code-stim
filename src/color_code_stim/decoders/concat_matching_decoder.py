@@ -18,6 +18,7 @@ from .color_correlated_decoding import (
 )
 from . import cross_color_relifting as relift
 from .prior_perturbation import PriorPerturbationEnsemble
+from .native_stage1_perturbation import NativeStage1Ensemble, resolve_native_seed
 from .matching_cache import MatchingCache, StagePrior, StageStructure
 from ..config import COLOR_LABEL, color_to_color_val
 from ..dem_utils.dem_manager import DemManager
@@ -87,6 +88,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         perturbation_alpha: float = 0.0,
         perturbation_seed: int | None = None,
         use_original_prior_for_stage2: bool = False,
+        stage1_perturbation: bool = False,
     ):
         """
         Initialize the concatenated matching decoder.
@@ -113,6 +115,10 @@ class ConcatMatchingDecoder(BaseDecoder):
         self._matching_cache = MatchingCache()
         self._candidate_evaluators = {}
         self.enable_cross_color_relifting = enable_cross_color_relifting
+        if type(stage1_perturbation) is not bool:
+            raise ValueError("stage1_perturbation must be boolean")
+        self.stage1_perturbation = stage1_perturbation
+        enable_prior_perturbation = enable_prior_perturbation or stage1_perturbation
         self.enable_prior_perturbation = enable_prior_perturbation
         if not isinstance(perturbation_ensemble_size, int) or perturbation_ensemble_size < 1:
             raise ValueError("perturbation_ensemble_size must be >= 1")
@@ -120,10 +126,10 @@ class ConcatMatchingDecoder(BaseDecoder):
             raise ValueError("perturbation_alpha must be between 0 and 1")
         self.perturbation_ensemble_size = perturbation_ensemble_size
         self.perturbation_alpha = perturbation_alpha
-        self.perturbation_seed = perturbation_seed
+        self.perturbation_seed = resolve_native_seed(perturbation_seed) if stage1_perturbation else perturbation_seed
         if type(use_original_prior_for_stage2) is not bool:
             raise ValueError("use_original_prior_for_stage2 must be boolean")
-        self.use_original_prior_for_stage2 = use_original_prior_for_stage2
+        self.use_original_prior_for_stage2 = use_original_prior_for_stage2 or stage1_perturbation
         if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
             raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
         self._perturbation_ensemble = None
@@ -160,6 +166,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         custom_dem_data: Optional[Dict[str, Tuple[Tuple, Tuple]]] = None,
         compute_swim_distance: bool = False,
         return_candidate_data: bool = False,
+        perturbation_shot_offset: int | None = None,
         **kwargs,
     ) -> Union[np.ndarray, Tuple[np.ndarray, dict]]:
         """
@@ -207,6 +214,8 @@ class ConcatMatchingDecoder(BaseDecoder):
             If full_output is False: predicted observables as bool array.
             If full_output is True: tuple of (predictions, extra_outputs_dict).
         """
+        if perturbation_shot_offset is not None and not self.stage1_perturbation:
+            raise ValueError("perturbation_shot_offset requires stage1_perturbation=True")
         if compute_swim_distance:
             if custom_dem_data is not None:
                 raise NotImplementedError("Swim output with custom_dem_data is not supported")
@@ -222,7 +231,7 @@ class ConcatMatchingDecoder(BaseDecoder):
                 raise NotImplementedError("Prior perturbation with erasure predecoding is unsupported")
             return self._decode_prior_perturbation(
                 detector_outcomes, colors, logical_value, full_output, check_validity,
-                compute_swim_distance,
+                compute_swim_distance, perturbation_shot_offset,
             )
         if self.enable_cross_color_relifting:
             if self.dem_manager.remove_non_edge_like_errors:
@@ -858,16 +867,21 @@ class ConcatMatchingDecoder(BaseDecoder):
 
     def _decode_prior_perturbation(
         self, detector_outcomes, colors, logical_value, full_output, check_validity,
-        compute_swim_distance=False,
+        compute_swim_distance=False, perturbation_shot_offset=None,
     ):
-        """Resample one common-DEM ensemble per shot and share it across classes."""
+        """Generate a per-shot ensemble and retain the existing candidate contract."""
         if colors != "all" and colors != ["r", "g", "b"]:
             raise ValueError("Prior perturbation requires all three colors r, g, b")
         if self._perturbation_ensemble is None:
-            self._perturbation_ensemble = PriorPerturbationEnsemble(
-                self.dem_manager, self.perturbation_ensemble_size,
-                self.perturbation_alpha, self.perturbation_seed,
-            )
+            if self.stage1_perturbation:
+                self._perturbation_ensemble = NativeStage1Ensemble(
+                    self.dem_manager, self.perturbation_ensemble_size,
+                    self.perturbation_alpha, self.perturbation_seed, self._matching_cache)
+            else:
+                self._perturbation_ensemble = PriorPerturbationEnsemble(
+                    self.dem_manager, self.perturbation_ensemble_size,
+                    self.perturbation_alpha, self.perturbation_seed,
+                )
         ensemble = self._perturbation_ensemble
         manager = self.dem_manager
         detector_outcomes = np.asarray(detector_outcomes, dtype=bool)
@@ -888,6 +902,15 @@ class ConcatMatchingDecoder(BaseDecoder):
                   if full_output else None)
         n_classes, n_shots, n_errors = len(logical_classes), len(detector_outcomes), manager.H.shape[1]
         n_candidates = 3 * self.perturbation_ensemble_size
+        native_stage1 = None
+        if self.stage1_perturbation:
+            offset = ensemble.start(perturbation_shot_offset, n_shots)
+            native_stage1 = []
+            for logical in logical_classes:
+                det = detector_outcomes.copy()
+                if self.comparative_decoding:
+                    det[:, -self.num_obs:] = logical
+                native_stage1.append({color: ensemble.decode_stage1(det, color, offset) for color in colors})
         need_mapped = full_output or compute_swim_distance or check_validity
         need_hypotheses = full_output or compute_swim_distance
         mapped = (np.zeros((n_classes, n_candidates, n_shots, n_errors), dtype=bool)
@@ -910,9 +933,12 @@ class ConcatMatchingDecoder(BaseDecoder):
         shot_groups = ([slice(0, n_shots)] if fixed_priors and n_shots else
                        (slice(shot, shot + 1) for shot in range(n_shots)))
         for shot_slice in shot_groups:
-            decompositions_by_member = ensemble.next_shot()
-            if fixed_priors:
-                ensemble.shot_position += n_shots - 1
+            if self.stage1_perturbation:
+                decompositions_by_member = [manager.dems_decomposed] * ensemble.size
+            else:
+                decompositions_by_member = ensemble.next_shot()
+                if fixed_priors:
+                    ensemble.shot_position += n_shots - 1
             for class_index, logical in enumerate(logical_classes):
                 det = detector_outcomes[shot_slice].copy()
                 if self.comparative_decoding:
@@ -921,13 +947,14 @@ class ConcatMatchingDecoder(BaseDecoder):
                     for color_index, color in enumerate(colors):
                         slot = 3 * member + color_index
                         temporary = decompositions[color]
-                        custom = None if member == 0 else {
+                        custom = None if member == 0 or self.stage1_perturbation else {
                             color: (temporary.stage_priors if hasattr(temporary, 'stage_priors')
                                     else tuple(StagePrior(
                                         self._matching_cache.base_structure(color, stage, H), p)
                                         for stage, (H, p) in enumerate(zip(temporary.Hs, temporary.probs), start=1)))
                         }
-                        stage1 = self._decode_stage1(det, color, custom)
+                        stage1 = (native_stage1[class_index][color][shot_slice, member]
+                                  if self.stage1_perturbation else self._decode_stage1(det, color, custom))
                         if need_hypotheses:
                             if stage1_hypotheses[class_index][slot] is None:
                                 stage1_hypotheses[class_index][slot] = np.zeros(
@@ -952,6 +979,8 @@ class ConcatMatchingDecoder(BaseDecoder):
                             native[class_index][slot][shot_slice] = aligned
                             generations[class_index, slot, shot_slice] = diagnostic
                         weights[class_index, slot, shot_slice] = score
+        if self.stage1_perturbation:
+            ensemble.advance(offset, n_shots)
         if n_shots:
             best_class, best_slot, selected_weights, gaps = _get_final_predictions(weights)
             selected = (mapped[best_class, best_slot, np.arange(n_shots)]

@@ -125,6 +125,7 @@ class ColorCode:
         _decompose_dem: bool = True,
         _benchmarking: bool = False,
         use_original_prior_for_stage2: bool = False,
+        stage1_perturbation: bool = False,
     ):
         """
         Class for constructing a color code circuit and simulating the
@@ -239,6 +240,10 @@ class ColorCode:
             'original_dem' scores mapped stage-2 corrections with the unchanged
             probabilities of the pre-decomposition X/Z DEM. Color-correlated
             decoding requires 'original_dem'; other modes default to 'stage2'.
+        stage1_perturbation : bool, default False
+            Opt into native independent stage-1-edge ensembles. Automatically
+            enables prior perturbation and original-prior stage 2. Requires the
+            modified PyMatching backend; retains the configured final scoring.
         use_original_prior_for_stage2 : bool, default False
             In prior perturbation decoding, use the unmodified X/Z DEM color
             decomposition for stage 2 while retaining perturbed stage-1 priors.
@@ -434,6 +439,10 @@ class ColorCode:
             raise ValueError("color_correlated_b must be positive and finite")
         self.color_correlated_b = float(color_correlated_b)
         self.enable_cross_color_relifting = enable_cross_color_relifting
+        if type(stage1_perturbation) is not bool:
+            raise ValueError("stage1_perturbation must be boolean")
+        self.stage1_perturbation = stage1_perturbation
+        enable_prior_perturbation = enable_prior_perturbation or stage1_perturbation
         self.enable_prior_perturbation = enable_prior_perturbation
         if not isinstance(perturbation_ensemble_size, int) or perturbation_ensemble_size < 1:
             raise ValueError("perturbation_ensemble_size must be >= 1")
@@ -441,10 +450,13 @@ class ColorCode:
             raise ValueError("perturbation_alpha must be between 0 and 1")
         self.perturbation_ensemble_size = perturbation_ensemble_size
         self.perturbation_alpha = perturbation_alpha
+        if stage1_perturbation:
+            from .decoders.native_stage1_perturbation import resolve_native_seed
+            perturbation_seed = resolve_native_seed(perturbation_seed)
         self.perturbation_seed = perturbation_seed
         if type(use_original_prior_for_stage2) is not bool:
             raise ValueError("use_original_prior_for_stage2 must be boolean")
-        self.use_original_prior_for_stage2 = use_original_prior_for_stage2
+        self.use_original_prior_for_stage2 = use_original_prior_for_stage2 or stage1_perturbation
         if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
             raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
         if enable_cross_color_relifting and enable_colorcorrelated_decoding:
@@ -601,6 +613,7 @@ class ColorCode:
                 color_correlated_b=self.color_correlated_b,
                 enable_cross_color_relifting=self.enable_cross_color_relifting,
                 enable_prior_perturbation=self.enable_prior_perturbation,
+                stage1_perturbation=self.stage1_perturbation,
                 perturbation_ensemble_size=self.perturbation_ensemble_size,
                 perturbation_alpha=self.perturbation_alpha,
                 perturbation_seed=self.perturbation_seed,
@@ -611,9 +624,15 @@ class ColorCode:
             if state is not None and self.enable_prior_perturbation:
                 from .decoders.prior_perturbation import PriorPerturbationEnsemble
                 decoder = self._concat_matching_decoder
-                decoder._perturbation_ensemble = PriorPerturbationEnsemble(
-                    self.dem_manager, self.perturbation_ensemble_size,
-                    self.perturbation_alpha, self.perturbation_seed)
+                if self.stage1_perturbation:
+                    from .decoders.native_stage1_perturbation import NativeStage1Ensemble
+                    decoder._perturbation_ensemble = NativeStage1Ensemble(
+                        self.dem_manager, self.perturbation_ensemble_size,
+                        self.perturbation_alpha, self.perturbation_seed, decoder._matching_cache)
+                else:
+                    decoder._perturbation_ensemble = PriorPerturbationEnsemble(
+                        self.dem_manager, self.perturbation_ensemble_size,
+                        self.perturbation_alpha, self.perturbation_seed)
                 decoder._perturbation_ensemble.set_state(state)
         return self._concat_matching_decoder
 
@@ -989,6 +1008,7 @@ class ColorCode:
         verbose: bool = False,
         compute_swim_distance: bool = False,
         return_candidate_data: bool = False,
+        perturbation_shot_offset: int | None = None,
     ) -> np.ndarray | Tuple[np.ndarray, dict]:
         """
         Decode detector outcomes using concatenated MWPM decoding.
@@ -1046,6 +1066,10 @@ class ColorCode:
             predicted to be -1.
         extra_outputs : dict, only when full_output is True
             Dictionary containing additional decoding outputs.
+
+        Native mode accepts perturbation_shot_offset=None to advance its cursor,
+        or an absolute shot index to replay identical colour-specific priors.
+        Other modes reject this option.
         """
         if self.enable_colorcorrelated_decoding and bp_predecoding:
             raise NotImplementedError("Color-correlated decoding with BP predecoding is not supported")
@@ -1073,6 +1097,7 @@ class ColorCode:
         return self.concat_matching_decoder.decode(
             compute_swim_distance=compute_swim_distance,
             return_candidate_data=return_candidate_data,
+            perturbation_shot_offset=perturbation_shot_offset,
             detector_outcomes=detector_outcomes,
             colors=colors,
             logical_value=logical_value,
@@ -1366,11 +1391,12 @@ class ColorCode:
         )
         instance.color_correlated_b = data.get("color_correlated_b", 1.0)
         instance.enable_cross_color_relifting = data.get("enable_cross_color_relifting", False)
-        instance.enable_prior_perturbation = data.get("enable_prior_perturbation", False)
+        instance.stage1_perturbation = data.get("stage1_perturbation", False)
+        instance.enable_prior_perturbation = data.get("enable_prior_perturbation", False) or instance.stage1_perturbation
         instance.perturbation_ensemble_size = data.get("perturbation_ensemble_size", 1)
         instance.perturbation_alpha = data.get("perturbation_alpha", 0.0)
         instance.perturbation_seed = data.get("perturbation_seed", None)
-        instance.use_original_prior_for_stage2 = data.get("use_original_prior_for_stage2", False)
+        instance.use_original_prior_for_stage2 = data.get("use_original_prior_for_stage2", False) or instance.stage1_perturbation
         instance.color_correlated_weight_basis = data.get(
             "color_correlated_weight_basis",
             "original_dem" if instance.enable_colorcorrelated_decoding else "stage2",
