@@ -124,6 +124,7 @@ class ColorCode:
         _generate_dem: bool = True,
         _decompose_dem: bool = True,
         _benchmarking: bool = False,
+        use_original_prior_for_stage2: bool = False,
     ):
         """
         Class for constructing a color code circuit and simulating the
@@ -238,6 +239,11 @@ class ColorCode:
             'original_dem' scores mapped stage-2 corrections with the unchanged
             probabilities of the pre-decomposition X/Z DEM. Color-correlated
             decoding requires 'original_dem'; other modes default to 'stage2'.
+        use_original_prior_for_stage2 : bool, default False
+            In prior perturbation decoding, use the unmodified X/Z DEM color
+            decomposition for stage 2 while retaining perturbed stage-1 priors.
+            False uses the perturbed decomposition in both matching stages.
+            Final candidate selection always uses the unchanged base prior.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -425,6 +431,9 @@ class ColorCode:
         self.perturbation_ensemble_size = perturbation_ensemble_size
         self.perturbation_alpha = perturbation_alpha
         self.perturbation_seed = perturbation_seed
+        if type(use_original_prior_for_stage2) is not bool:
+            raise ValueError("use_original_prior_for_stage2 must be boolean")
+        self.use_original_prior_for_stage2 = use_original_prior_for_stage2
         if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
             raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
         if enable_cross_color_relifting and enable_colorcorrelated_decoding:
@@ -584,6 +593,7 @@ class ColorCode:
                 perturbation_ensemble_size=self.perturbation_ensemble_size,
                 perturbation_alpha=self.perturbation_alpha,
                 perturbation_seed=self.perturbation_seed,
+                use_original_prior_for_stage2=self.use_original_prior_for_stage2,
                 color_correlated_weight_basis=self.color_correlated_weight_basis,
             )
         return self._concat_matching_decoder
@@ -1338,6 +1348,7 @@ class ColorCode:
         instance.perturbation_ensemble_size = data.get("perturbation_ensemble_size", 1)
         instance.perturbation_alpha = data.get("perturbation_alpha", 0.0)
         instance.perturbation_seed = data.get("perturbation_seed", None)
+        instance.use_original_prior_for_stage2 = data.get("use_original_prior_for_stage2", False)
         instance.color_correlated_weight_basis = data.get(
             "color_correlated_weight_basis",
             "original_dem" if instance.enable_colorcorrelated_decoding else "stage2",
