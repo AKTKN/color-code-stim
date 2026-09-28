@@ -31,7 +31,7 @@ def test_baseline_member_and_zero_alpha():
                                           out["candidate_weights"][0, :3])
 
 
-def test_fixed_common_prior_preserves_dem_and_base():
+def test_per_shot_common_prior_preserves_dem_and_base():
     cc = code(size=3)
     manager = cc.dem_manager
     original_dem = str(manager.dem_xz)
@@ -40,14 +40,18 @@ def test_fixed_common_prior_preserves_dem_and_base():
     cc.decode(shots)
     ensemble = cc.concat_matching_decoder._perturbation_ensemble
     same = code(size=3).concat_matching_decoder
-    # The ensemble is constructed once and reused across calls and batches.
-    same.decode(shots[:1])
+    # Same initial seed and shot positions reproduce the per-shot stream.
+    same.decode(shots)
     for q1, q2 in zip(ensemble.probabilities, same._perturbation_ensemble.probabilities):
         np.testing.assert_array_equal(q1, q2)
     other = code(size=3, seed=20).concat_matching_decoder
-    other.decode(shots[:1])
+    other.decode(shots)
     assert any(not np.array_equal(a, b) for a, b in zip(
         ensemble.probabilities[1:], other._perturbation_ensemble.probabilities[1:]))
+    previous = [q.copy() for q in ensemble.probabilities]
+    cc.decode(shots[:1])
+    assert ensemble.shot_position == 4
+    assert any(not np.array_equal(a, b) for a, b in zip(previous[1:], ensemble.probabilities[1:]))
     for member in (1, 2):
         q = ensemble.probabilities[member]
         dem = ensemble._builder.build(q)
@@ -86,7 +90,7 @@ def test_candidates_calls_batches_and_base_scoring(monkeypatch, comparative, bas
     monkeypatch.setattr(decoder, "_decode_stage2", stage2)
     pred, out = cc.decode(shots, full_output=True)
     n_classes = 2 if comparative else 1
-    assert calls == [6*n_classes, 6*n_classes]
+    assert calls == [6*n_classes*len(shots), 6*n_classes*len(shots)]
     assert out["candidate_weights"].shape == (n_classes, 6, 6)
     assert out["candidate_ensemble_members"] == (0, 0, 0, 1, 1, 1)
     evaluator = CandidateEvaluator(cc.dem_manager, basis)
@@ -95,7 +99,8 @@ def test_candidates_calls_batches_and_base_scoring(monkeypatch, comparative, bas
             color = out["candidate_target_colors"][slot]
             scored = evaluator.evaluate(color, aligned, out["candidate_generation_weights"][cls, slot])[2]
             np.testing.assert_allclose(scored, out["candidate_weights"][cls, slot])
-    pieces = [cc.decode(part, full_output=True) for part in (shots[:2], shots[2:])]
+    split = code(size=2, comparative=comparative, basis=basis)
+    pieces = [split.decode(part, full_output=True) for part in (shots[:2], shots[2:])]
     np.testing.assert_array_equal(pred, np.concatenate([p[0] for p in pieces]))
     np.testing.assert_allclose(out["weights"], np.concatenate([p[1]["weights"] for p in pieces]))
     if comparative:
@@ -137,9 +142,10 @@ def test_temporary_alignment_and_comparative_class_locality(monkeypatch):
 
     monkeypatch.setattr(CandidateEvaluator, "evaluate", checked)
     _, combined = cc.decode(shots, full_output=True)
-    assert seen == list("rgb") * 2
+    assert seen == list("rgb") * (2 * len(shots))
     for cls, logical in enumerate((False, True)):
-        _, isolated = cc.decode(shots, logical_value=[logical], full_output=True)
+        _, isolated = code(size=2, comparative=True).decode(
+            shots, logical_value=[logical], full_output=True)
         np.testing.assert_array_equal(combined["candidate_weights"][cls],
                                       isolated["candidate_weights"][0])
 
@@ -173,7 +179,7 @@ def test_swim_uses_base_stage2_prior_and_selected_logical_class():
     cc = code(size=2, alpha=.7)
     shots, _ = cc.sample(8, seed=107)
     hard, extra = cc.decode(shots, full_output=True, compute_swim_distance=True)
-    off = cc.decode(shots)
+    off = code(size=2, alpha=.7).decode(shots)
     np.testing.assert_array_equal(hard, off)
     decoder = cc.concat_matching_decoder
     for slot, color in enumerate(extra["candidate_target_colors"]):
@@ -227,7 +233,7 @@ def test_stage2_prior_switch(monkeypatch, original_stage2, comparative, basis):
     np.testing.assert_array_equal(
         np.asarray((mapped.astype(np.uint8) @ cc.dem_manager.H.T) % 2, dtype=bool),
         expected_syndrome)
-    assert len(stage1_calls) == len(stage2_calls) == (18 if comparative else 9)
+    assert len(stage1_calls) == len(stage2_calls) == len(shots) * (18 if comparative else 9)
     assert stage1_calls[3] is not None  # stage 1 still uses perturbed priors
     for index, (custom1, custom2) in enumerate(zip(stage1_calls, stage2_calls)):
         if original_stage2 or index % 9 < 3:
@@ -240,7 +246,9 @@ def test_stage2_prior_switch(monkeypatch, original_stage2, comparative, basis):
             color = extra["candidate_target_colors"][slot]
             score = evaluator.evaluate(color, native, 0)[2]
             np.testing.assert_allclose(score, extra["candidate_weights"][cls, slot])
-    pieces = [cc.decode(part) for part in (shots[:5], shots[5:])]
+    split = code(size=3, alpha=.8, comparative=comparative, basis=basis,
+                 use_original_prior_for_stage2=original_stage2)
+    pieces = [split.decode(part) for part in (shots[:5], shots[5:])]
     np.testing.assert_array_equal(prediction, np.concatenate(pieces))
 
 

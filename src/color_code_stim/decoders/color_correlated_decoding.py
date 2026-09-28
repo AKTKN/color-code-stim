@@ -157,6 +157,12 @@ class CandidateEvaluator:
             else:
                 mapped = np.zeros(base_native.shape[:-1] + (self._source_count,), dtype=bool)
                 mapped[..., indices] = base_native
+        elif (getattr(temporary, 'base_decomposition', None) is base
+              and self._base_maps[color] is not None):
+            # This immutable source alignment was validated when the symbolic
+            # plan was prepared. The original-DEM reconstruction still occurs.
+            mapped = np.asarray(temporary.map_errors_to_org_dem(native, stage=2), dtype=bool)
+            base_native = mapped[..., self._base_maps[color]]
         else:
             mapped, base_native = align_stage2_to_base(native, temporary, base)
         if self._original_llr is None:

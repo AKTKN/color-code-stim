@@ -244,6 +244,17 @@ class ColorCode:
             decomposition for stage 2 while retaining perturbed stage-1 priors.
             False uses the perturbed decomposition in both matching stages.
             Final candidate selection always uses the unchanged base prior.
+        enable_prior_perturbation : bool, default False
+            Resample nonbaseline common-X/Z-DEM ensemble members independently
+            for every shot, sharing each draw across colors and logical classes.
+        perturbation_ensemble_size : int, default 1
+            Number of members including the unchanged baseline member 0.
+        perturbation_alpha : float, default 0.0
+            Perturb q by clip(q * (1 + alpha * Uniform(-1, 1)), eps, 1-eps).
+            Zero retains the exact baseline probabilities.
+        perturbation_seed : int or None, default None
+            Initialize the advancing shot/member/source random stream. The
+            stream is invariant to batch partition and persists through save/load.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -596,6 +607,14 @@ class ColorCode:
                 use_original_prior_for_stage2=self.use_original_prior_for_stage2,
                 color_correlated_weight_basis=self.color_correlated_weight_basis,
             )
+            state = getattr(self, '_prior_perturbation_state', None)
+            if state is not None and self.enable_prior_perturbation:
+                from .decoders.prior_perturbation import PriorPerturbationEnsemble
+                decoder = self._concat_matching_decoder
+                decoder._perturbation_ensemble = PriorPerturbationEnsemble(
+                    self.dem_manager, self.perturbation_ensemble_size,
+                    self.perturbation_alpha, self.perturbation_seed)
+                decoder._perturbation_ensemble.set_state(state)
         return self._concat_matching_decoder
 
     @property
@@ -1249,6 +1268,9 @@ class ColorCode:
             The file path where the object should be saved.
         """
         data = self.__dict__.copy()
+        decoder = self._concat_matching_decoder
+        if decoder is not None and decoder._perturbation_ensemble is not None:
+            data['_prior_perturbation_state'] = decoder._perturbation_ensemble.get_state()
 
         # Known non-picklable attributes based on modular architecture
         known_non_picklable = [

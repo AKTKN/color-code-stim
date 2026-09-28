@@ -98,6 +98,26 @@ perturbed prior while stage 2 uses the original X/Z DEM's color decomposition,
 including its original column order. Final candidate comparison uses the
 unchanged base prior selected by `color_correlated_weight_basis` in both modes;
 member 0 is unchanged. This option persists through `ColorCode.save/load`.
+Members 1 through M-1 are independently resampled for **every shot**, on the
+common original X/Z DEM. Each shot/member draw is shared by all three colors
+and all comparative logical hypotheses. A decoder-owned RNG advances in
+shot/member/source order across calls; a seed reproduces the same ordered shot
+stream regardless of batch partition or `full_output`. Repeating a call on an
+already advanced decoder consumes fresh draws. Save/load resumes this stream;
+legacy files without stream state start from their configured seed. M=1 and
+alpha=0 consume no random numbers, while still advancing the shot position.
+Older fixed-ensemble runs have different sampling semantics.
+
+The six ordinary weighted matchings and immutable check filtering are reused
+across calls. Dynamic weighted matchings use an exact graph/prior cache bounded
+at 32 entries, plus current-shot references for reuse across logical hypotheses.
+Perturbation uses cached symbolic source maps, preserving the exact probability
+products and probability-dependent stage-2 column sorting. New per-shot weights
+still require new weighted matchings. With original-prior stage 2, all members
+share the three ordinary stage-2 matchings. Matching caches are rebuilt lazily
+after loading. Hard-output decoding avoids retaining full candidate correction
+and diagnostic tensors; original-DEM correction mapping and scoring still run.
+
 Color-correlated decoding retains 12
 slots: its baseline requires six calls, with zero, three, or nine guided
 reruns for baseline equality classes 0, 1, or 2 respectively (six, twelve,
