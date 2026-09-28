@@ -91,7 +91,14 @@ mapped baseline corrections and duplicate target Stage-2 syndromes dynamically
 prune actual calls. It requires `remove_non_edge_like_errors=False` and a
 graphlike full decomposition. The X/Z-DEM perturbation ensemble
 (`enable_prior_perturbation=True`, `perturbation_ensemble_size=M`) has `3*M`
-candidates and `6*M` calls per class. Color-correlated decoding retains 12
+candidates and `6*M` calls per class. By default,
+`use_original_prior_for_stage2=False` uses each member's perturbed color
+decomposition for both matching stages. With `True`, stage 1 retains the
+perturbed prior while stage 2 uses the original X/Z DEM's color decomposition,
+including its original column order. Final candidate comparison uses the
+unchanged base prior selected by `color_correlated_weight_basis` in both modes;
+member 0 is unchanged. This option persists through `ColorCode.save/load`.
+Color-correlated decoding retains 12
 slots: its baseline requires six calls, with zero, three, or nine guided
 reruns for baseline equality classes 0, 1, or 2 respectively (six, twelve,
 or 24 total calls). The `relift_run` and `color_correlated_run` values classify

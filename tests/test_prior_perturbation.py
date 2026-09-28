@@ -189,3 +189,118 @@ def test_swim_uses_base_stage2_prior_and_selected_logical_class():
     expected = np.min(np.where(same, extra["candidate_swim_distances"][0], np.inf), axis=0)
     np.testing.assert_array_equal(expected, extra["class_min_swim_distance"])
     assert np.all(expected <= extra["selected_swim_distance"] + 1e-12)
+
+
+@pytest.mark.parametrize("original_stage2", [False, True])
+@pytest.mark.parametrize("comparative", [False, True])
+@pytest.mark.parametrize("basis", ["stage2", "original_dem"])
+def test_stage2_prior_switch(monkeypatch, original_stage2, comparative, basis):
+    cc = code(size=3, alpha=.8, comparative=comparative, basis=basis,
+              use_original_prior_for_stage2=original_stage2)
+    shots, _ = cc.sample(16, seed=103)
+    decoder = cc.concat_matching_decoder
+    old1, old2 = decoder._decode_stage1, decoder._decode_stage2
+    stage1_calls, stage2_calls = [], []
+
+    def stage1(det, color, custom):
+        stage1_calls.append(custom)
+        return old1(det, color, custom)
+
+    def stage2(det, hypothesis, color, custom):
+        stage2_calls.append(custom)
+        result = old2(det, hypothesis, color, custom)
+        if original_stage2:
+            expected = old2(det, hypothesis, color)
+            np.testing.assert_array_equal(result[0], expected[0])
+            np.testing.assert_array_equal(result[1], expected[1])
+        return result
+
+    monkeypatch.setattr(decoder, "_decode_stage1", stage1)
+    monkeypatch.setattr(decoder, "_decode_stage2", stage2)
+    prediction, extra = cc.decode(shots, full_output=True, check_validity=True)
+    # Comparative DEMs append the logical constraint to the detector rows;
+    # check against the selected class, which can differ from the sampled class.
+    expected_syndrome = shots.copy()
+    if comparative:
+        expected_syndrome[:, -cc.num_obs:] = np.asarray(prediction).reshape(-1, cc.num_obs)
+    mapped = extra["error_preds"]
+    np.testing.assert_array_equal(
+        np.asarray((mapped.astype(np.uint8) @ cc.dem_manager.H.T) % 2, dtype=bool),
+        expected_syndrome)
+    assert len(stage1_calls) == len(stage2_calls) == (18 if comparative else 9)
+    assert stage1_calls[3] is not None  # stage 1 still uses perturbed priors
+    for index, (custom1, custom2) in enumerate(zip(stage1_calls, stage2_calls)):
+        if original_stage2 or index % 9 < 3:
+            assert custom2 is None
+        else:
+            assert custom2 is custom1
+    evaluator = CandidateEvaluator(cc.dem_manager, basis)
+    for cls, row in enumerate(extra["candidate_native_stage2_preds"]):
+        for slot, native in enumerate(row):
+            color = extra["candidate_target_colors"][slot]
+            score = evaluator.evaluate(color, native, 0)[2]
+            np.testing.assert_allclose(score, extra["candidate_weights"][cls, slot])
+    pieces = [cc.decode(part) for part in (shots[:5], shots[5:])]
+    np.testing.assert_array_equal(prediction, np.concatenate(pieces))
+
+
+@pytest.mark.parametrize("original_stage2", [False, True])
+def test_stage2_switch_baseline_and_persistence(original_stage2, tmp_path):
+    baseline = code(enabled=False)
+    shots, _ = baseline.sample(8, seed=31)
+    for size, alpha in ((1, .7), (3, 0)):
+        cc = code(size=size, alpha=alpha, use_original_prior_for_stage2=original_stage2)
+        np.testing.assert_array_equal(cc.decode(shots), baseline.decode(shots))
+    cc = code(use_original_prior_for_stage2=original_stage2)
+    path = tmp_path / "prior.pkl"
+    cc.save(str(path))
+    restored = ColorCode.load(str(path))
+    assert restored.use_original_prior_for_stage2 is original_stage2
+    assert restored.concat_matching_decoder.use_original_prior_for_stage2 is original_stage2
+    np.testing.assert_array_equal(cc.decode(shots), restored.decode(shots))
+
+
+def test_stage2_switch_requires_boolean():
+    with pytest.raises(ValueError, match="use_original_prior_for_stage2"):
+        code(use_original_prior_for_stage2="false")
+
+
+@pytest.mark.parametrize("noise", ["bitflip", "depol", "uniform"])
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_original_stage2_circuit_corrections_and_legacy_false(noise, rounds):
+    noise_model = (NoiseModel.uniform_circuit_noise(.003) if noise == "uniform" else
+                   NoiseModel(**{noise: .03}))
+    common = dict(d=3, rounds=rounds, noise_model=noise_model,
+                  enable_prior_perturbation=True, perturbation_ensemble_size=3,
+                  perturbation_alpha=1.0, perturbation_seed=17,
+                  color_correlated_weight_basis="original_dem")
+    legacy = ColorCode(**common)
+    explicit_false = ColorCode(**common, use_original_prior_for_stage2=False)
+    original = ColorCode(**common, use_original_prior_for_stage2=True)
+    shots, _ = legacy.sample(16, seed=99)
+    pred, out = legacy.decode(shots, full_output=True)
+    false_pred, false_out = explicit_false.decode(shots, full_output=True)
+    np.testing.assert_array_equal(pred, false_pred)
+    for name in ("candidate_weights", "candidate_generation_weights",
+                 "candidate_original_corrections", "error_preds", "best_candidate_indices"):
+        np.testing.assert_array_equal(out[name], false_out[name])
+    _, original_out = original.decode(shots, full_output=True, check_validity=True)
+    assert original_out["validity"].all()
+    np.testing.assert_array_equal(out["candidate_weights"][:, :3],
+                                  original_out["candidate_weights"][:, :3])
+
+
+def test_loading_saved_code_without_stage2_prior_option(tmp_path):
+    import pickle
+    cc = code()
+    shots, _ = cc.sample(4, seed=31)
+    path = tmp_path / "legacy.pkl"
+    cc.save(str(path))
+    with path.open("rb") as stream:
+        data = pickle.load(stream)
+    del data["use_original_prior_for_stage2"]
+    with path.open("wb") as stream:
+        pickle.dump(data, stream)
+    restored = ColorCode.load(str(path))
+    assert restored.use_original_prior_for_stage2 is False
+    np.testing.assert_array_equal(cc.decode(shots), restored.decode(shots))

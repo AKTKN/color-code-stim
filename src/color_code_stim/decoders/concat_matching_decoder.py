@@ -86,6 +86,7 @@ class ConcatMatchingDecoder(BaseDecoder):
         perturbation_ensemble_size: int = 1,
         perturbation_alpha: float = 0.0,
         perturbation_seed: int | None = None,
+        use_original_prior_for_stage2: bool = False,
     ):
         """
         Initialize the concatenated matching decoder.
@@ -121,6 +122,9 @@ class ConcatMatchingDecoder(BaseDecoder):
         self.perturbation_ensemble_size = perturbation_ensemble_size
         self.perturbation_alpha = perturbation_alpha
         self.perturbation_seed = perturbation_seed
+        if type(use_original_prior_for_stage2) is not bool:
+            raise ValueError("use_original_prior_for_stage2 must be boolean")
+        self.use_original_prior_for_stage2 = use_original_prior_for_stage2
         if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
             raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
         self._perturbation_ensemble = None
@@ -876,10 +880,12 @@ class ConcatMatchingDecoder(BaseDecoder):
                     }
                     stage1 = self._decode_stage1(det, color, custom)
                     stage1_hypotheses[class_index][slot] = np.asarray(stage1, dtype=bool).copy()
-                    stage2, generation = self._decode_stage2(det, stage1, color, custom)
+                    # Original stage 2 returns corrections in base column order.
+                    stage2_custom = None if self.use_original_prior_for_stage2 else custom
+                    stage2, generation = self._decode_stage2(det, stage1, color, stage2_custom)
                     correction, aligned, score, diagnostic = evaluator.evaluate(
                         color, stage2, generation,
-                        temporary=None if member == 0 else temporary,
+                        temporary=None if stage2_custom is None else temporary,
                     )
                     mapped[class_index, slot] = correction
                     native[class_index][slot] = aligned
