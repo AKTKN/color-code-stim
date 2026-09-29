@@ -84,6 +84,7 @@ class DemManager:
         # Store configuration
         self.temp_bdry_type = temp_bdry_type
         self.bp_prior_clipping = False
+        self.bp_stage1_probs_xz = None
         self._global_projection = None
         self.swim_data_only = swim_data_only
         self.circuit = circuit
@@ -396,5 +397,44 @@ class DemManager:
                 result.dem_xz.append(inst)
         result.H, result.obs_matrix, result.probs_xz = dem_to_parity_check(result.dem_xz)
         result.bp_prior_clipping = True
+        result.bp_stage1_probs_xz = None
         result.dems_decomposed = result._decompose_dems()
+        return result
+
+    def with_bp_stage1_dem(self, dem):
+        """Keep BP generation priors only in stage 1; score on physical priors.
+
+        X/Z source order and stage-1 hypotheses stay in the posterior view's
+        ordering. Stage 2 is rebuilt from the actual pre-BP probabilities,
+        including its probability-dependent column order and source maps.
+        """
+        from copy import copy
+        posterior = self.with_dem(dem)
+        def key(inst):
+            return tuple(sorted(inst.targets_copy(), key=str))
+        physical_errors = [inst for inst in self.dem_xz if inst.type == 'error']
+        physical = {key(inst): inst.args_copy()[0] for inst in physical_errors}
+        projected = [inst for inst in posterior.dem_xz if inst.type == 'error']
+        if (len(physical) != len(physical_errors)
+                or len(projected) != len(physical)
+                or {key(inst) for inst in projected} != set(physical)):
+            raise ValueError('BP and physical X/Z DEM source labels do not align')
+        result = copy(posterior)
+        result.bp_stage1_probs_xz = posterior.probs_xz.copy()
+        result.dem_xz = stim.DetectorErrorModel()
+        for inst in posterior.dem_xz:
+            if inst.type == 'error':
+                # Never cap or otherwise transform the original physical prior.
+                result.dem_xz.append('error', physical[key(inst)], inst.targets_copy())
+            else:
+                result.dem_xz.append(inst)
+        result.H, result.obs_matrix, result.probs_xz = dem_to_parity_check(result.dem_xz)
+        result.dems_decomposed = result._decompose_dems()
+        for color, original in result.dems_decomposed.items():
+            bp = posterior.dems_decomposed[color]
+            if ((original.Hs[0] != bp.Hs[0]).nnz
+                    or (original.error_map_matrices[0] != bp.error_map_matrices[0]).nnz):
+                raise ValueError('Physical-prior rebuild changed BP stage-1 source ordering')
+            original.probs = (bp.probs[0], original.probs[1])
+            original._dems = (bp[0], original[1])
         return result

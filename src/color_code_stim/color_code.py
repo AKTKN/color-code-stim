@@ -1040,9 +1040,10 @@ class ColorCode:
             weight will be selected.
         bp_predecoding : bool, default False
             Run BP on the original global DEM. Converged shots return its
-            observable prediction; other shots aggregate posterior probabilities
-            into X/Z DEM mechanisms, then encode -log(p) as effective priors
-            p/(1+p) before color decomposition. See docs/global_bp_predecoding.md.
+            observable prediction; other shots use posterior-derived -log(p)
+            weights only for stage 1. Stage 2 and final candidate selection use
+            the original physical priors, overriding the ordinary stage-2 and
+            comparison-basis options. See docs/global_bp_predecoding.md.
         bp_prms : dict, default None
             Parameters for the belief propagation decoder.
         erasure_matcher_predecoding : bool, default False

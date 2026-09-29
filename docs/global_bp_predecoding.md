@@ -53,25 +53,37 @@ weight; p=0.5 gives log(2). Posteriors above 0.5 are no longer flattened.
 
 The transformation occurs **before color/stage decomposition**, not on global
 mechanisms and not independently on each final stage-1/stage-2 matching edge.
-Those stages retain their existing probability-combination rules using the
-effective priors. This does not reproduce official belief matching exactly:
+Only **stage 1** uses the resulting effective priors (version 4). This does
+not reproduce official belief matching exactly:
 our X/Z aggregation retains independent XOR, whereas its edge aggregation
 uses addition. Effective priors are not physical posterior probabilities.
 
-Color decomposition is rebuilt for this shot. Probability-dependent
-stage-2 column sorting and correction source maps are rebuilt together;
-original-DEM perturbations also retain their existing symbolic ordering maps.
+The original pre-BP X/Z DEM's physical probabilities are matched to the
+projected source labels, including observables. Stage 2 is rebuilt from those
+physical probabilities; its column sorting and source maps are rebuilt
+together. Stage-1 graph ordering and posterior-derived weights are retained
+exactly. Original physical probabilities are not capped or transformed.
+Source-label or stage-1 alignment failures raise an explicit error.
 The shared original DEM, priors and cached ordinary decoder are unchanged.
 
 Ordinary, comparative, color-correlated, relifting, original-DEM perturbation
-and native stage-1 perturbation use this posterior DEM as their base. Final
-candidate scoring retains the configured comparison basis within that DEM.
-Color-correlated ordinary baselines are computed in the same posterior DEM.
+and native stage-1 perturbation follow this separation. **Final selection uses
+original physical X/Z log odds** for every color/member/logical class. In BP
+mode the effective options are `use_original_prior_for_stage2=True` and
+`color_correlated_weight_basis="original_dem"`, even if ordinary-decoder
+settings request otherwise. These overrides do not mutate the ColorCode's
+ordinary decoder or its configured no-BP behavior.
+
+Guide reweighting and original-DEM perturbation start from the posterior
+stage-1 source priors, not physical source priors. Native perturbation starts
+from the same decomposed posterior stage-1 edge probabilities as version 3.
+Perturbed/guide priors never enter stage 2 or final selection. Color-correlated
+ordinary baselines use BP stage 1 and physical stage 2 / original-DEM selection.
 Guide-raised and perturbed BP priors are capped at 0.5. Native stage-1 uses
 the PyMatching fork's explicit `clip_perturbed_probabilities=True` mode;
 without BP, its existing rejection of possible negative weights is unchanged.
 The usual native topology restrictions and incompatible strategy combinations
-still apply. Supported SWIM uses the shot's posterior base priors; its proxy
+still apply. Supported SWIM uses physical stage-2 priors; its proxy
 interpretation is unchanged.
 
 Hard predictions are returned for every shot. When metrics or full output
@@ -91,12 +103,15 @@ save/load preserves the resolved uint64 seed and cursor. Native draws retain
 their existing color streams and absolute shot seed; capped weights identify
 scheme version 2. BP original-DEM perturbation uses NumPy generators seeded
 with `SeedSequence([resolved_seed, absolute_shot])`, shared across colors and
-logical classes. Global-BP state and run logs now store version 3 and
+logical classes. Global-BP state and run logs now store version 4 and
 `weight_rule="negative_log_xz_probability"`. The native perturbation law
-remains scheme version 2; its input base priors now follow the new rule.
+remains scheme version 2; stage-1 probabilities and random draws are unchanged
+from version 3. State/log metadata identifies `stage2_prior` and
+`selection_prior` as `original_physical`.
 Replay across split batches, worker reconstruction and converged-shot skips
-is retained. Version-2 decoder states are rejected explicitly, since they
-used capped global posteriors and different matching weights. Historical
+is retained. Version-2 and version-3 decoder states are rejected explicitly:
+both used posterior-derived stage-2 and selection priors, and version 2 also
+capped the global posterior before projection. Historical
 saved results remain historical results; they are not converted by this change.
 No-BP original-DEM sampling is unchanged.
 

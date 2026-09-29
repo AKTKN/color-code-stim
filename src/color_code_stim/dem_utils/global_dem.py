@@ -13,7 +13,7 @@ import stim
 from ..stim_utils import dem_to_parity_check
 
 MATCHING_EPS = 1e-14
-GLOBAL_BP_VERSION = 3
+GLOBAL_BP_VERSION = 4
 GLOBAL_BP_WEIGHT_RULE = "negative_log_xz_probability"
 
 

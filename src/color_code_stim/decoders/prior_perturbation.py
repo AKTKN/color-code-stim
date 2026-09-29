@@ -90,7 +90,7 @@ class PriorPerturbationEnsemble:
 
     def __init__(self, manager, size: int, alpha: float, seed: int | None):
         self._manager = manager
-        self._builder = OriginalDemProbabilityBuilder(manager)
+        self._builder = OriginalDemProbabilityBuilder(manager, stage1=True)
         self._plans = ({color: DecompositionPlan(manager.dems_decomposed[color], color)
                         for color in COLORS} if size > 1 and alpha > 0 else {})
         self.size, self.alpha = size, alpha

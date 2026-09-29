@@ -1,9 +1,12 @@
 import numpy as np
 import pytest
 import stim
+from copy import copy
 from scipy.special import logit
 from color_code_stim import ColorCode
 from color_code_stim.decoders.concat_matching_decoder import ConcatMatchingDecoder
+from color_code_stim.dem_utils.dem_decomp import DemDecomp
+from color_code_stim.stim_utils import dem_to_parity_check
 
 
 def code(memory='Z',**kwargs):
@@ -48,7 +51,7 @@ def test_real_bp_syndrome_consistency_and_split_batches(memory):
     {'enable_cross_color_relifting':True,'remove_non_edge_like_errors':False},
     {'enable_prior_perturbation':True,'perturbation_ensemble_size':3,'perturbation_alpha':1,'perturbation_seed':19},
     {'stage1_perturbation':True,'perturbation_ensemble_size':3,'perturbation_alpha':1,'perturbation_seed':19}])
-def test_fallback_matches_direct_negative_log_xz_dem_decoder(monkeypatch,strategy):
+def test_fallback_matches_bp_stage1_physical_stage2_reference(monkeypatch,strategy):
     c=code(**strategy)
     det,actual=c.sample(1,seed=4)
     wrapper=c.belief_concat_matching_decoder
@@ -65,7 +68,25 @@ def test_fallback_matches_direct_negative_log_xz_dem_decoder(monkeypatch,strateg
             effective_dem.append('error',float(1/(1+np.exp(weight))),inst.targets_copy())
         else:
             effective_dem.append(inst)
-    manager=c.dem_manager.with_dem(effective_dem)
+    posterior=c.dem_manager.with_dem(effective_dem)
+    # Independent hybrid reference: construct physical source probabilities
+    # from the ordinary DEM, retain only the posterior stage-1 arrays.
+    physical={frozenset(map(str,i.targets_copy())):i.args_copy()[0]
+              for i in c.dem_xz if i.type=='error'}
+    physical_dem=stim.DetectorErrorModel()
+    for inst in effective_dem:
+        if inst.type=='error':
+            physical_dem.append('error',physical[frozenset(map(str,inst.targets_copy()))],inst.targets_copy())
+        else:
+            physical_dem.append(inst)
+    manager=copy(posterior)
+    manager.dem_xz=physical_dem
+    manager.H,manager.obs_matrix,manager.probs_xz=dem_to_parity_check(physical_dem)
+    manager.bp_stage1_probs_xz=posterior.probs_xz.copy()
+    manager.dems_decomposed={color:DemDecomp(org_dem=physical_dem,color=color,
+        remove_non_edge_like_errors=c.dem_manager.remove_non_edge_like_errors) for color in 'rgb'}
+    for color,decomp in manager.dems_decomposed.items():
+        decomp.probs=(posterior.dems_decomposed[color].probs[0],decomp.probs[1])
     options=wrapper.options
     reference=ConcatMatchingDecoder(manager,**options)
     if strategy.get('enable_prior_perturbation') and not strategy.get('stage1_perturbation'):
@@ -97,8 +118,10 @@ def test_y_rejected_even_for_empty_batch_and_unknown_metrics():
         c.decode(np.zeros((1,c.circuit.num_detectors)),bp_predecoding=True,metrics=['nonsense'])
 
 
-def test_save_load_and_empty_batches(tmp_path):
-    c=code(enable_prior_perturbation=True,perturbation_ensemble_size=3,perturbation_alpha=.3,perturbation_seed=19)
+@pytest.mark.parametrize('native',[False,True])
+def test_save_load_and_empty_batches(tmp_path,native):
+    c=code(enable_prior_perturbation=True,stage1_perturbation=native,
+           perturbation_ensemble_size=3,perturbation_alpha=.3,perturbation_seed=19)
     det,_=c.sample(12,seed=7)
     c.decode(det[:5],bp_predecoding=True,bp_prms={'max_iter':1})
     path=tmp_path/'decoder.pkl';c.save(path)
@@ -111,12 +134,14 @@ def test_save_load_and_empty_batches(tmp_path):
 def test_weighting_state_rejects_old_or_different_rules():
     wrapper=code().belief_concat_matching_decoder
     state=wrapper.get_state()
-    assert state['version']==3
+    assert state['version']==4
     assert state['weight_rule']=='negative_log_xz_probability'
+    assert state['stage2_prior']==state['selection_prior']=='original_physical'
     wrapper.set_state(state)
     old=dict(state,version=2)
     old.pop('weight_rule')
-    for incompatible in (old,dict(state,weight_rule='negative_log_global_probability')):
+    for incompatible in (old,dict(state,version=3),dict(state,weight_rule='negative_log_global_probability'),
+                         dict(state,stage2_prior='bp_posterior')):
         with pytest.raises(ValueError,match='weighting version/rule'):
             wrapper.set_state(incompatible)
 

@@ -23,7 +23,7 @@ MATCHING_EPS = 1e-14
 class OriginalDemProbabilityBuilder:
     """Replace probabilities in the common X/Z DEM without changing its sources."""
 
-    def __init__(self, dem_manager):
+    def __init__(self, dem_manager, *, stage1=False):
         self.base_dem = dem_manager.dem_xz.flattened()
         self.base_q = np.asarray(dem_manager.probs_xz, dtype=float).copy()
         if sum(inst.type == "error" for inst in self.base_dem) != len(self.base_q):
@@ -31,6 +31,8 @@ class OriginalDemProbabilityBuilder:
         for color in COLORS:
             if not np.array_equal(dem_manager.dems_decomposed[color].org_prob, self.base_q):
                 raise ValueError("color decomposition has different original DEM source ordering")
+        if stage1 and getattr(dem_manager, 'bp_stage1_probs_xz', None) is not None:
+            self.base_q = dem_manager.bp_stage1_probs_xz.copy()
 
     def build(self, probabilities: np.ndarray) -> stim.DetectorErrorModel:
         probabilities = np.asarray(probabilities, dtype=float)
@@ -179,7 +181,7 @@ class ColorCorrelatedPriorReweighter:
         if type(b) not in (int, float) or not math.isfinite(b) or b <= 0:
             raise ValueError("color_correlated_b must be positive and finite")
         self._manager = dem_manager
-        self._builder = OriginalDemProbabilityBuilder(dem_manager)
+        self._builder = OriginalDemProbabilityBuilder(dem_manager, stage1=True)
         self._base_q = self._builder.base_q
         self.b = float(b)
         self._raised_q = np.minimum(self._base_q ** (1 / self.b), .5 if dem_manager.bp_prior_clipping else 1 - MATCHING_EPS)

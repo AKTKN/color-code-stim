@@ -19,6 +19,10 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
         self.comparative_decoding = dem_manager.comparative_decoding
         self._concat_decoder = None
         self.options = dict(decoder_options or {})
+        # BP supplies generation information only for stage 1. These effective
+        # policies override ordinary-decoder options without mutating ColorCode.
+        self.options['use_original_prior_for_stage2'] = True
+        self.options['color_correlated_weight_basis'] = 'original_dem'
         self.bp_decoder = BPDecoder(dem_manager, cache_inputs=bp_cache_inputs)
         self.shot_position = 0
         import secrets
@@ -50,12 +54,14 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
     def get_state(self):
         return dict(kind='global_bp', version=GLOBAL_BP_VERSION,
                     weight_rule=GLOBAL_BP_WEIGHT_RULE, probability_cap=.5, seed=self.resolved_seed,
+                    stage2_prior='original_physical', selection_prior='original_physical',
                     options=self.options, shot_position=self.shot_position,
                     rng=deepcopy(self.rng.bit_generator.state))
 
     def set_state(self, state):
         current = self.get_state()
-        if set(state) != set(current) or any(state[k] != current[k] for k in ('kind','version','weight_rule','probability_cap','options')):
+        if set(state) != set(current) or any(state[k] != current[k] for k in (
+                'kind','version','weight_rule','probability_cap','options','stage2_prior','selection_prior')):
             raise ValueError('Global BP configuration differs (including weighting version/rule)')
         if type(state['shot_position']) is not int or not 0 <= state['shot_position'] < 2**64:
             raise ValueError('Invalid BP shot position')
@@ -148,7 +154,7 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
         try:
             for i in np.flatnonzero(~converged):
                 q = expit(-llrs[i])
-                local = manager.with_dem(projection.project(q, negative_log_weights=True))
+                local = manager.with_bp_stage1_dem(projection.project(q, negative_log_weights=True))
                 decoder = ConcatMatchingDecoder(local, **self.options)
                 native = self.options.get('stage1_perturbation', False)
                 if self.options.get('enable_prior_perturbation') and not native:
@@ -159,7 +165,8 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
                     decoder._perturbation_ensemble = ensemble
                 baseline = None
                 if self.options.get('enable_colorcorrelated_decoding'):
-                    baseline = ConcatMatchingDecoder(local).decode(detectors[i:i+1],colors=colors,logical_value=logical_value)
+                    baseline = ConcatMatchingDecoder(local, color_correlated_weight_basis='original_dem').decode(
+                        detectors[i:i+1],colors=colors,logical_value=logical_value)
                 scorer = candidate_scorer
                 owner = getattr(candidate_scorer,'__self__',None)
                 if owner is not None and hasattr(owner,'for_dem_manager'):

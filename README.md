@@ -6,7 +6,9 @@
 global DEM. It returns converged BP predictions directly. For other shots,
 it aggregates raw posteriors into X/Z DEM mechanisms using independent XOR,
 assigns `-log(p)` weights, then passes effective probabilities `p/(1+p)` to
-color decomposition (global-BP weighting version 3).
+stage-1 color decomposition. **Stage 2 and final color/logical-class selection
+use the original pre-BP physical prior** (global-BP version 4). This applies
+to ordinary and advanced candidate strategies, including native perturbation.
 `bp_converged` identifies skipped concatenated decoding; its metrics are
 masked on those shots. Install the optional dependency with
 `pip install 'color-code-stim[bp]'`.
