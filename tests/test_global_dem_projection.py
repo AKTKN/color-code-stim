@@ -85,6 +85,32 @@ def test_zero_half_and_tiny_probability_contraction():
     np.testing.assert_allclose(plan.probabilities([1,.2,1]),[.8,.8],rtol=1e-15)
 
 
+def test_negative_log_weights_apply_after_css_aggregation():
+    plan=GlobalDemProjection(toy(),'Z')
+    q=np.array([.9,.2,.3])
+    # Enumerated odd-parity probabilities for sources (0,1) and (1,2).
+    p=np.array([.9*.8+.1*.2, .2*.7+.8*.3])
+    raw=plan.project(q)
+    weighted=plan.project(q,negative_log_weights=True)
+    h,obs,effective=dem_to_parity_check(weighted)
+    np.testing.assert_allclose(np.log((1-effective)/effective),-np.log(p),rtol=1e-14)
+    assert [i.targets_copy() for i in weighted]==[i.targets_copy() for i in raw]
+    # Neither early transformation nor clipping q at 0.5 has these weights.
+    assert not np.allclose(effective,plan.probabilities(q/(1+q)))
+    capped=plan.probabilities(np.minimum(q,.5))
+    assert not np.allclose(effective,capped/(1+capped))
+
+
+@pytest.mark.parametrize('p',[0.,1e-20,.1,.5,.9,.99,1.])
+def test_negative_log_effective_probability_endpoints(p):
+    plan=GlobalDemProjection(toy(),'Z')
+    _,_,effective=dem_to_parity_check(plan.project([p,0,0],negative_log_weights=True))
+    assert np.isfinite(effective).all()
+    np.testing.assert_allclose(effective,[p/(1+p),0],rtol=1e-14,atol=0)
+    if p:
+        np.testing.assert_allclose(np.log((1-effective[0])/effective[0]),-np.log(p),rtol=1e-13,atol=1e-15)
+
+
 def test_posterior_column_reordering_preserves_source_maps():
     from color_code_stim.decoders.prior_perturbation import DecompositionPlan
     c=ColorCode(d=3,rounds=3,p_circuit=.02)

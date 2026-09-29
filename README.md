@@ -3,8 +3,10 @@
 # color-code-stim
 
 [`bp_predecoding=True`](docs/global_bp_predecoding.md) runs BP on the unsplit
-global DEM. It returns converged BP predictions directly and uses capped BP
-posterior probabilities to build the CSS matching DEM for other shots.
+global DEM. It returns converged BP predictions directly. For other shots,
+it aggregates raw posteriors into X/Z DEM mechanisms using independent XOR,
+assigns `-log(p)` weights, then passes effective probabilities `p/(1+p)` to
+color decomposition (global-BP weighting version 3).
 `bp_converged` identifies skipped concatenated decoding; its metrics are
 masked on those shots. Install the optional dependency with
 `pip install 'color-code-stim[bp]'`.

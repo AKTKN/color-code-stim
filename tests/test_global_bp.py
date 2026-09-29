@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import stim
 from scipy.special import logit
 from color_code_stim import ColorCode
 from color_code_stim.decoders.concat_matching_decoder import ConcatMatchingDecoder
@@ -47,7 +48,7 @@ def test_real_bp_syndrome_consistency_and_split_batches(memory):
     {'enable_cross_color_relifting':True,'remove_non_edge_like_errors':False},
     {'enable_prior_perturbation':True,'perturbation_ensemble_size':3,'perturbation_alpha':1,'perturbation_seed':19},
     {'stage1_perturbation':True,'perturbation_ensemble_size':3,'perturbation_alpha':1,'perturbation_seed':19}])
-def test_fallback_matches_direct_posterior_dem_decoder_and_caps_probabilities(monkeypatch,strategy):
+def test_fallback_matches_direct_negative_log_xz_dem_decoder(monkeypatch,strategy):
     c=code(**strategy)
     det,actual=c.sample(1,seed=4)
     wrapper=c.belief_concat_matching_decoder
@@ -55,8 +56,16 @@ def test_fallback_matches_direct_posterior_dem_decoder_and_caps_probabilities(mo
     raw=np.linspace(.01,.9,len(plan.priors))
     monkeypatch.setattr(wrapper.bp_decoder,'decode',lambda *args,**kwargs:
         (np.zeros((1,len(raw)),dtype=np.uint8),-logit(raw)[None,:],np.array([False])))
-    q=np.clip(raw,1e-14,.5)
-    manager=c.dem_manager.with_dem(plan.project(q))
+    # Independent reference: project raw posteriors first, then convert the
+    # X/Z mechanism weights back through the existing log-odds API.
+    effective_dem=stim.DetectorErrorModel()
+    for inst in plan.project(raw):
+        if inst.type=='error':
+            weight=-np.log(inst.args_copy()[0])
+            effective_dem.append('error',float(1/(1+np.exp(weight))),inst.targets_copy())
+        else:
+            effective_dem.append(inst)
+    manager=c.dem_manager.with_dem(effective_dem)
     options=wrapper.options
     reference=ConcatMatchingDecoder(manager,**options)
     if strategy.get('enable_prior_perturbation') and not strategy.get('stage1_perturbation'):
@@ -75,6 +84,7 @@ def test_fallback_matches_direct_posterior_dem_decoder_and_caps_probabilities(mo
     physical_h=manager.H[:-manager.circuit.num_observables] if manager.comparative_decoding else manager.H
     np.testing.assert_array_equal((correction @ physical_h.T)%2,det[:,:physical_h.shape[0]])
     np.testing.assert_array_equal(extra['concat_outputs'][0]['error_preds'],reference_extra['error_preds'])
+    np.testing.assert_allclose(extra['concat_outputs'][0]['weights'],reference_extra['weights'],rtol=1e-13,atol=1e-13)
     np.testing.assert_array_equal((correction @ manager.obs_matrix.T)%2,pred.reshape(1,-1))
 
 
@@ -96,6 +106,19 @@ def test_save_load_and_empty_batches(tmp_path):
     np.testing.assert_array_equal(c.decode(det[5:],bp_predecoding=True,bp_prms={'max_iter':1}),restored.decode(det[5:],bp_predecoding=True,bp_prms={'max_iter':1}))
     out,extra=restored.decode(det[:0],bp_predecoding=True,metrics=['weights'])
     assert out.shape==(0,) and extra['bp_converged'].shape==(0,)
+
+
+def test_weighting_state_rejects_old_or_different_rules():
+    wrapper=code().belief_concat_matching_decoder
+    state=wrapper.get_state()
+    assert state['version']==3
+    assert state['weight_rule']=='negative_log_xz_probability'
+    wrapper.set_state(state)
+    old=dict(state,version=2)
+    old.pop('weight_rule')
+    for incompatible in (old,dict(state,weight_rule='negative_log_global_probability')):
+        with pytest.raises(ValueError,match='weighting version/rule'):
+            wrapper.set_state(incompatible)
 
 
 @pytest.mark.parametrize('native',[False,True])

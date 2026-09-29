@@ -25,8 +25,8 @@ For a converged shot, the returned prediction is the global correction times
 the global observable matrix modulo two. Its correction is checked against
 the BP syndrome. Noise separation and concatenated matching are skipped.
 
-For a nonconverged shot, the global mechanism prior becomes
-`q[e] = min(expit(-posterior_llr[e]), 0.5)`. Mechanisms are projected by
+For a nonconverged shot, the global mechanism posterior is
+`q[e] = expit(-posterior_llr[e])`, without a 0.5 cap. Mechanisms are projected by
 detector Pauli metadata, directly from this global mechanism space. Logical
 labels go to the X detector sector for `temp_bdry_type="X"`, and the Z
 detector sector for `"Z"`. Y memory raises `NotImplementedError` before any
@@ -43,9 +43,22 @@ it does not reconstruct the joint BP posterior or retain X/Z correlations.
 The global and projected spaces have separate source IDs and matrices.
 Logical labels that differ never collide in the projection.
 
-Projected matcher probabilities are regularized to `[1e-14, 0.5]` after
-contraction. Matching uses `log((1-p)/p)`, including exactly zero weight at
-p=0.5. Color decomposition is rebuilt for this shot. Probability-dependent
+**After this X/Z aggregation**, each projected DEM mechanism (possibly a
+hyperedge) receives weight `w = -log(p)`. The existing probability-based
+color decomposition receives the effective prior
+`p_eff = 1/(1+exp(w)) = p/(1+p)`, so its log odds reproduce `w`.
+This algebraic evaluation avoids infinities at p=0; effective priors are then
+regularized to `[1e-14, 0.5]`, giving a finite maximum weight. p=1 gives zero
+weight; p=0.5 gives log(2). Posteriors above 0.5 are no longer flattened.
+
+The transformation occurs **before color/stage decomposition**, not on global
+mechanisms and not independently on each final stage-1/stage-2 matching edge.
+Those stages retain their existing probability-combination rules using the
+effective priors. This does not reproduce official belief matching exactly:
+our X/Z aggregation retains independent XOR, whereas its edge aggregation
+uses addition. Effective priors are not physical posterior probabilities.
+
+Color decomposition is rebuilt for this shot. Probability-dependent
 stage-2 column sorting and correction source maps are rebuilt together;
 original-DEM perturbations also retain their existing symbolic ordering maps.
 The shared original DEM, priors and cached ordinary decoder are unchanged.
@@ -78,8 +91,13 @@ save/load preserves the resolved uint64 seed and cursor. Native draws retain
 their existing color streams and absolute shot seed; capped weights identify
 scheme version 2. BP original-DEM perturbation uses NumPy generators seeded
 with `SeedSequence([resolved_seed, absolute_shot])`, shared across colors and
-logical classes. Its law/version is stored as global-BP version 2, permitting
-replay across split batches, worker reconstruction and converged-shot skips.
+logical classes. Global-BP state and run logs now store version 3 and
+`weight_rule="negative_log_xz_probability"`. The native perturbation law
+remains scheme version 2; its input base priors now follow the new rule.
+Replay across split batches, worker reconstruction and converged-shot skips
+is retained. Version-2 decoder states are rejected explicitly, since they
+used capped global posteriors and different matching weights. Historical
+saved results remain historical results; they are not converted by this change.
 No-BP original-DEM sampling is unchanged.
 
 The first implementation rebuilds the matching DEM and decoder for each

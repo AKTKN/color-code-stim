@@ -1040,8 +1040,9 @@ class ColorCode:
             weight will be selected.
         bp_predecoding : bool, default False
             Run BP on the original global DEM. Converged shots return its
-            observable prediction; other shots match a posterior-weighted CSS
-            DEM. See docs/global_bp_predecoding.md.
+            observable prediction; other shots aggregate posterior probabilities
+            into X/Z DEM mechanisms, then encode -log(p) as effective priors
+            p/(1+p) before color decomposition. See docs/global_bp_predecoding.md.
         bp_prms : dict, default None
             Parameters for the belief propagation decoder.
         erasure_matcher_predecoding : bool, default False

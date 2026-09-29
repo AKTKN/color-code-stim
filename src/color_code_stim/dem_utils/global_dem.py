@@ -1,8 +1,9 @@
 """Global-mechanism BP model and independent-prior CSS projection.
 
-The projection preserves each sector's marginal in the independent surrogate
+By default, projection preserves each sector's marginal in the independent surrogate
 whose mechanism probabilities are supplied by BP. It does not preserve the
 joint BP posterior or correlations between the two projected sectors.
+The optional negative-log encoding instead produces effective matching priors.
 """
 from collections import OrderedDict
 
@@ -12,6 +13,8 @@ import stim
 from ..stim_utils import dem_to_parity_check
 
 MATCHING_EPS = 1e-14
+GLOBAL_BP_VERSION = 3
+GLOBAL_BP_WEIGHT_RULE = "negative_log_xz_probability"
 
 
 class GlobalDemProjection:
@@ -73,10 +76,19 @@ class GlobalDemProjection:
                 result.append(-np.expm1(log_magnitude) / 2)
         return np.asarray(result)
 
-    def project(self, probabilities):
-        """Aggregate parity, retaining distinct logical labels and detector IDs."""
+    def project(self, probabilities, *, negative_log_weights=False):
+        """Aggregate parity, retaining distinct logical labels and detector IDs.
+
+        With negative_log_weights, encode -log(p) for each aggregated X/Z
+        mechanism as an effective probability p/(1+p). Downstream log odds
+        then reproduce that weight. This transformation happens before color
+        decomposition, but strictly after global-to-CSS aggregation.
+        """
         result = stim.DetectorErrorModel()
         for p, targets in zip(self.probabilities(probabilities), self.targets):
+            if negative_log_weights:
+                # Equivalent to w=-log(p), p_eff=expit(-w); stable at p=0,1.
+                p = p / (1 + p)
             result.append("error", float(p), list(targets))
         result += self.metadata
         # Observable declarations retain dimensions even when a sector is empty.

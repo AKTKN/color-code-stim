@@ -2,6 +2,7 @@
 from copy import deepcopy
 import numpy as np
 from scipy.special import expit
+from ..dem_utils.global_dem import GLOBAL_BP_VERSION, GLOBAL_BP_WEIGHT_RULE
 
 from .base import BaseDecoder
 from .bp_decoder import BPDecoder
@@ -47,14 +48,15 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
         return self.concat_decoder
 
     def get_state(self):
-        return dict(kind='global_bp', version=2, probability_cap=.5, seed=self.resolved_seed,
+        return dict(kind='global_bp', version=GLOBAL_BP_VERSION,
+                    weight_rule=GLOBAL_BP_WEIGHT_RULE, probability_cap=.5, seed=self.resolved_seed,
                     options=self.options, shot_position=self.shot_position,
                     rng=deepcopy(self.rng.bit_generator.state))
 
     def set_state(self, state):
         current = self.get_state()
-        if set(state) != set(current) or any(state[k] != current[k] for k in ('kind','version','probability_cap','options')):
-            raise ValueError('Global BP configuration differs')
+        if set(state) != set(current) or any(state[k] != current[k] for k in ('kind','version','weight_rule','probability_cap','options')):
+            raise ValueError('Global BP configuration differs (including weighting version/rule)')
         if type(state['shot_position']) is not int or not 0 <= state['shot_position'] < 2**64:
             raise ValueError('Invalid BP shot position')
         if type(state['seed']) is not int or not 0 <= state['seed'] < 2**64:
@@ -145,8 +147,8 @@ class BeliefConcatMatchingDecoder(BaseDecoder):
         old_rng = deepcopy(self.rng.bit_generator.state)
         try:
             for i in np.flatnonzero(~converged):
-                q = np.minimum(expit(-llrs[i]), .5)
-                local = manager.with_dem(projection.project(q))
+                q = expit(-llrs[i])
+                local = manager.with_dem(projection.project(q, negative_log_weights=True))
                 decoder = ConcatMatchingDecoder(local, **self.options)
                 native = self.options.get('stage1_perturbation', False)
                 if self.options.get('enable_prior_perturbation') and not native:
