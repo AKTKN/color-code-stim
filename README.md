@@ -2,6 +2,11 @@
 
 # color-code-stim
 
+For experiment statistics, use [`decode(..., metrics=(...))`](docs/experiment_metrics.md)
+with the default `full_output=False`. It returns only requested `(shots,)`
+arrays, while preserving matching, selection, ties and RNG state. Existing
+`full_output=True` remains available for candidate diagnostics.
+
 The opt-in [`stage1_perturbation`](docs/native_stage1_perturbation.md) workflow
 generates stage-1 ensembles inside the modified PyMatching backend and reuses
 original-prior stage-2 graphs. Its default is False, retaining original-DEM

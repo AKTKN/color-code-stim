@@ -1009,6 +1009,10 @@ class ColorCode:
         compute_swim_distance: bool = False,
         return_candidate_data: bool = False,
         perturbation_shot_offset: int | None = None,
+        metrics: Sequence[str] | None = None,
+        actual_observables: np.ndarray | None = None,
+        baseline_predictions: np.ndarray | None = None,
+        candidate_scorer=None,
     ) -> np.ndarray | Tuple[np.ndarray, dict]:
         """
         Decode detector outcomes using concatenated MWPM decoding.
@@ -1056,6 +1060,13 @@ class ColorCode:
             Include generated stage-1 hypotheses, mapped corrections and
             candidate validity in full_output for an external circuit-level
             soft-output scorer. Hard selection is unchanged.
+        metrics : sequence of str, optional
+            With full_output=False, return (predictions, metrics_dict) containing
+            only the requested per-shot scalar arrays. Error metrics require
+            actual_observables. Color-correlated baseline error metrics also
+            require ordinary baseline_predictions. candidate_scorer optionally
+            supplies unchanged-prior circuit SWIM values during generation.
+            See docs/experiment_metrics.md for supported names and scope.
 
         Returns
         -------
@@ -1064,8 +1075,9 @@ class ColorCode:
             2D if otherwise. obs_preds[i] or obs_preds[i,j] is True if and only
             if the j-th observable (j=0 when 1D) of the i-th sample is
             predicted to be -1.
-        extra_outputs : dict, only when full_output is True
-            Dictionary containing additional decoding outputs.
+        extra_outputs : dict, when full_output is True or metrics is not None
+            Diagnostics for full_output; otherwise only the requested per-shot
+            metric arrays. No candidate diagnostics are included in metrics mode.
 
         Native mode accepts perturbation_shot_offset=None to advance its cursor,
         or an absolute shot index to replay identical colour-specific priors.
@@ -1077,6 +1089,8 @@ class ColorCode:
             raise NotImplementedError("Cross-color relifting with BP predecoding is unsupported")
         if self.enable_prior_perturbation and bp_predecoding:
             raise NotImplementedError("Prior perturbation with BP predecoding is unsupported")
+        if metrics is not None and bp_predecoding:
+            raise NotImplementedError("metrics with BP predecoding is unsupported")
         if compute_swim_distance and bp_predecoding:
             raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
@@ -1095,6 +1109,10 @@ class ColorCode:
 
         # Delegate to ConcatMatchingDecoder for standard decoding
         return self.concat_matching_decoder.decode(
+            metrics=metrics,
+            actual_observables=actual_observables,
+            baseline_predictions=baseline_predictions,
+            candidate_scorer=candidate_scorer,
             compute_swim_distance=compute_swim_distance,
             return_candidate_data=return_candidate_data,
             perturbation_shot_offset=perturbation_shot_offset,
