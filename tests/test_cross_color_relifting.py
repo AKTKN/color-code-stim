@@ -168,8 +168,10 @@ def test_incompatibilities_and_persistence(tmp_path):
                   enable_cross_color_relifting=True, enable_colorcorrelated_decoding=True)
     cc = make_code()
     shots, _ = cc.sample(1, seed=4)
-    with pytest.raises(NotImplementedError, match="BP"):
-        cc.decode(shots, bp_predecoding=True)
+    bp_prediction, bp_extra = cc.decode(shots, bp_predecoding=True, metrics=["weights"])
+    assert bp_prediction.shape == (len(shots),)
+    assert bp_extra["bp_converged"].dtype == bool
+    np.testing.assert_array_equal(np.ma.getmaskarray(bp_extra["weights"]), bp_extra["bp_converged"])
     with pytest.raises(NotImplementedError, match="UNCLASSIFIED"):
         cc.decode(shots, compute_swim_distance=True)
     with pytest.raises(NotImplementedError, match="custom DEM"):

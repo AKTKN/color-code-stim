@@ -117,7 +117,7 @@ class PriorPerturbationEnsemble:
             else:
                 xi = self._rng.uniform(-1, 1, len(self._builder.base_q))
                 q = np.clip(self._builder.base_q * (1 + self.alpha * xi),
-                            MATCHING_EPS, 1 - MATCHING_EPS)
+                            MATCHING_EPS, .5 if self._manager.bp_prior_clipping else 1 - MATCHING_EPS)
                 decompositions = {color: plan.evaluate(q)
                                   for color, plan in self._plans.items()}
             self.probabilities.append(q)

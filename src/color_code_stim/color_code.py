@@ -542,6 +542,8 @@ class ColorCode:
             if self._generate_dem:
                 self._dem_manager = DemManager(
                     circuit=self.circuit,
+                    temp_bdry_type=self.temp_bdry_type,
+                    lazy_dem=True,
                     swim_data_only=(self.circuit_type == "tri" and self.rounds == 1
                         and not self.comparative_decoding and self.temp_bdry_type == "Z"
                         and 0 < self.noise_model["bitflip"] < 0.5
@@ -653,7 +655,16 @@ class ColorCode:
             self._belief_concat_matching_decoder = BeliefConcatMatchingDecoder(
                 dem_manager=self.dem_manager,
                 bp_cache_inputs=True,
+                decoder_options={name: getattr(self, name) for name in (
+                    "enable_colorcorrelated_decoding", "color_correlated_b",
+                    "enable_cross_color_relifting", "enable_prior_perturbation",
+                    "stage1_perturbation", "perturbation_ensemble_size",
+                    "perturbation_alpha", "perturbation_seed",
+                    "use_original_prior_for_stage2", "color_correlated_weight_basis")},
             )
+            state = getattr(self, "_bp_prior_state", None)
+            if state is not None:
+                self._belief_concat_matching_decoder.set_state(state)
         return self._belief_concat_matching_decoder
 
     @property
@@ -960,8 +971,9 @@ class ColorCode:
         """
         Decode detector outcomes using belief propagation.
 
-        This method delegates to the BPDecoder while maintaining backward compatibility
-        with the _bp_inputs caching mechanism for integration with pre-decoding.
+        BP checks and returned error patterns use the original unsplit global
+        DEM mechanism space. Comparative logical hypothesis rows are excluded
+        from BP checks; global observable labels and mechanism columns remain.
 
         Parameters
         ----------
@@ -981,16 +993,6 @@ class ColorCode:
         converge : bool
             Whether the belief propagation algorithm converged within max_iter iterations.
         """
-        # Update _bp_inputs cache for compatibility with pre-decoding integration
-        if not self._bp_inputs:
-            if self.comparative_decoding:
-                dem = remove_obs_from_dem(self.dem_xz)
-            else:
-                dem = self.dem_xz
-            H, p = dem_to_parity_check(dem)
-            self._bp_inputs["H"] = H
-            self._bp_inputs["p"] = p
-
         # Delegate to BP decoder
         return self.bp_decoder.decode(detector_outcomes, max_iter=max_iter, **kwargs)
 
@@ -1009,6 +1011,7 @@ class ColorCode:
         compute_swim_distance: bool = False,
         return_candidate_data: bool = False,
         perturbation_shot_offset: int | None = None,
+        bp_shot_offset: int | None = None,
         metrics: Sequence[str] | None = None,
         actual_observables: np.ndarray | None = None,
         baseline_predictions: np.ndarray | None = None,
@@ -1036,7 +1039,9 @@ class ColorCode:
             combinations (i.e., logical classes) will be tried and the one with minimum
             weight will be selected.
         bp_predecoding : bool, default False
-            Whether to use belief propagation as a pre-decoding step.
+            Run BP on the original global DEM. Converged shots return its
+            observable prediction; other shots match a posterior-weighted CSS
+            DEM. See docs/global_bp_predecoding.md.
         bp_prms : dict, default None
             Parameters for the belief propagation decoder.
         erasure_matcher_predecoding : bool, default False
@@ -1082,17 +1087,14 @@ class ColorCode:
         Native mode accepts perturbation_shot_offset=None to advance its cursor,
         or an absolute shot index to replay identical colour-specific priors.
         Other modes reject this option.
+
+        BP also accepts bp_shot_offset for absolute physical-shot indexing,
+        retaining skipped shots in the perturbation stream. BP metrics always
+        include bp_converged; concatenated metrics are masked on those shots.
+        BP full_output adds concat_outputs with one diagnostic record per
+        fallback shot and None for skipped shots. With BP, metrics and
+        full_output can be combined for diagnostic verification.
         """
-        if self.enable_colorcorrelated_decoding and bp_predecoding:
-            raise NotImplementedError("Color-correlated decoding with BP predecoding is not supported")
-        if self.enable_cross_color_relifting and bp_predecoding:
-            raise NotImplementedError("Cross-color relifting with BP predecoding is unsupported")
-        if self.enable_prior_perturbation and bp_predecoding:
-            raise NotImplementedError("Prior perturbation with BP predecoding is unsupported")
-        if metrics is not None and bp_predecoding:
-            raise NotImplementedError("metrics with BP predecoding is unsupported")
-        if compute_swim_distance and bp_predecoding:
-            raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
         if bp_predecoding:
             return self.belief_concat_matching_decoder.decode(
@@ -1100,12 +1102,21 @@ class ColorCode:
                 colors=colors,
                 logical_value=logical_value,
                 bp_prms=bp_prms,
+                metrics=metrics, actual_observables=actual_observables,
+                candidate_scorer=candidate_scorer,
+                compute_swim_distance=compute_swim_distance,
+                return_candidate_data=return_candidate_data,
+                perturbation_shot_offset=perturbation_shot_offset,
+                bp_shot_offset=bp_shot_offset,
                 erasure_matcher_predecoding=erasure_matcher_predecoding,
                 partial_correction_by_predecoding=partial_correction_by_predecoding,
                 full_output=full_output,
                 check_validity=check_validity,
                 verbose=verbose,
             )
+
+        if bp_shot_offset is not None:
+            raise ValueError("bp_shot_offset requires bp_predecoding=True")
 
         # Delegate to ConcatMatchingDecoder for standard decoding
         return self.concat_matching_decoder.decode(
@@ -1311,6 +1322,9 @@ class ColorCode:
             The file path where the object should be saved.
         """
         data = self.__dict__.copy()
+        bp = self._belief_concat_matching_decoder
+        if bp is not None:
+            data["_bp_prior_state"] = bp.get_state()
         decoder = self._concat_matching_decoder
         if decoder is not None and decoder._perturbation_ensemble is not None:
             data['_prior_perturbation_state'] = decoder._perturbation_ensemble.get_state()

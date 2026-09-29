@@ -2,6 +2,13 @@
 
 # color-code-stim
 
+[`bp_predecoding=True`](docs/global_bp_predecoding.md) runs BP on the unsplit
+global DEM. It returns converged BP predictions directly and uses capped BP
+posterior probabilities to build the CSS matching DEM for other shots.
+`bp_converged` identifies skipped concatenated decoding; its metrics are
+masked on those shots. Install the optional dependency with
+`pip install 'color-code-stim[bp]'`.
+
 For experiment statistics, use [`decode(..., metrics=(...))`](docs/experiment_metrics.md)
 with the default `full_output=False`. It returns only requested `(shots,)`
 arrays, while preserving matching, selection, ties and RNG state. Existing
@@ -138,8 +145,9 @@ Both use the same exact equality rule and the first equal representative in
 weights are diagnostics.
 
 This option requires all three colors and unit-multiplicity source provenance.
-It currently cannot be combined with BP/custom DEM priors or matching-growth
-swim output. The default remains the ordinary three-candidate decoder.
+Custom DEM priors remain unsupported. BP is supported through the posterior
+DEM view described above; supported SWIM output uses that view's base priors.
+The default remains the ordinary three-candidate decoder.
 
 ## Project Structure
 

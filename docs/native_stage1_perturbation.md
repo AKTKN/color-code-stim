@@ -52,5 +52,13 @@ Install/build the native PyMatching fork on
 for `stage1_perturbation=False`. Missing native support produces an actionable
 error. Native stage 1 supports only simple graphlike columns with finite,
 nonnegative log odds; potential negative perturbations (`p1*(1+alpha)>0.5`)
-and parallel columns are rejected. The existing restrictions against combining
-perturbation with guide/relifting/predecoding modes remain in effect.
+and parallel columns are rejected. Perturbation remains incompatible with
+guide/relifting and erasure predecoding modes.
+
+Global BP predecoding is supported on `codex/global-bp-predecoding-20260929`.
+For a nonconverged BP shot, this shot's posterior CSS DEM is the base prior;
+stage 2 and final scoring use that prior. Native nonbaseline stage-1 priors
+are capped at 0.5 after perturbation, using PyMatching's explicit
+`clip_perturbed_probabilities=True` mode (scheme version 2). Member 0 and
+random draws are unchanged. Absolute shot IDs include converged BP shots.
+See [global BP](global_bp_predecoding.md) for its output and memory scope.

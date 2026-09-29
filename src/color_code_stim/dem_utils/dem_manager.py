@@ -62,6 +62,8 @@ class DemManager:
         comparative_decoding: bool = False,
         remove_non_edge_like_errors: bool = True,
         swim_data_only: bool = False,
+        temp_bdry_type: str = "Z",
+        lazy_dem: bool = False,
     ):
         """
         Initialize DEMManager with circuit and configuration.
@@ -80,6 +82,9 @@ class DemManager:
             Whether to remove non-edge-like errors in decomposition
         """
         # Store configuration
+        self.temp_bdry_type = temp_bdry_type
+        self.bp_prior_clipping = False
+        self._global_projection = None
         self.swim_data_only = swim_data_only
         self.circuit = circuit
         self.tanner_graph = tanner_graph
@@ -90,11 +95,63 @@ class DemManager:
         # Generate detector information first (needed for DEM generation)
         self.detector_info = self._generate_detector_info()
 
-        # Generate core DEM components
-        self.dem_xz, self.H, self.obs_matrix, self.probs_xz = self._generate_dem()
+        # BP needs only the original global DEM. Defer CSS preparation until
+        # matching is requested, so converged BP never separates circuit noise.
+        self._dem_xz = self._H = self._obs_matrix = self._probs_xz = None
+        self._dems_decomposed = None
+        if not lazy_dem:
+            self._ensure_dem()
+            self.dems_decomposed = self._decompose_dems()
 
-        # Decompose DEMs by color
-        self.dems_decomposed = self._decompose_dems()
+    def _ensure_dem(self):
+        if self._dem_xz is None:
+            self.dem_xz, self.H, self.obs_matrix, self.probs_xz = self._generate_dem()
+
+    @property
+    def dem_xz(self):
+        self._ensure_dem()
+        return self._dem_xz
+
+    @dem_xz.setter
+    def dem_xz(self, value):
+        self._dem_xz = value
+
+    @property
+    def H(self):
+        self._ensure_dem()
+        return self._H
+
+    @H.setter
+    def H(self, value):
+        self._H = value
+
+    @property
+    def obs_matrix(self):
+        self._ensure_dem()
+        return self._obs_matrix
+
+    @obs_matrix.setter
+    def obs_matrix(self, value):
+        self._obs_matrix = value
+
+    @property
+    def probs_xz(self):
+        self._ensure_dem()
+        return self._probs_xz
+
+    @probs_xz.setter
+    def probs_xz(self, value):
+        self._probs_xz = value
+
+    @property
+    def dems_decomposed(self):
+        if self._dems_decomposed is None:
+            self._dems_decomposed = self._decompose_dems()
+        return self._dems_decomposed
+
+    @dems_decomposed.setter
+    def dems_decomposed(self, value):
+        self._dems_decomposed = value
 
     def _generate_detector_info(self) -> Dict[str, Any]:
         """
@@ -312,3 +369,32 @@ class DemManager:
         dem1 = self.dems_decomposed[color][0].copy()
         dem2 = self.dems_decomposed[color][1].copy()
         return dem1, dem2
+
+    @property
+    def global_projection(self):
+        """Build BP before noise separation; retain the full mechanism space."""
+        if self._global_projection is None:
+            from .global_dem import GlobalDemProjection
+            global_dem = self.circuit.detector_error_model(flatten_loops=True, decompose_errors=False)
+            for obs in range(self.circuit.num_observables):
+                global_dem.append("logical_observable", [], [stim.target_logical_observable_id(obs)])
+            self._global_projection = GlobalDemProjection(global_dem, self.temp_bdry_type)
+        return self._global_projection
+
+    def with_dem(self, dem):
+        """Independent decoding view; never overwrite shared base priors/caches."""
+        from copy import copy
+        result = copy(self)
+        from .global_dem import MATCHING_EPS
+        # Contract global probabilities first. Regularize only projected
+        # matcher priors, retaining all columns even after BP underflow.
+        result.dem_xz = stim.DetectorErrorModel()
+        for inst in dem:
+            if inst.type == "error":
+                result.dem_xz.append("error", float(np.clip(inst.args_copy()[0], MATCHING_EPS, .5)), inst.targets_copy())
+            else:
+                result.dem_xz.append(inst)
+        result.H, result.obs_matrix, result.probs_xz = dem_to_parity_check(result.dem_xz)
+        result.bp_prior_clipping = True
+        result.dems_decomposed = result._decompose_dems()
+        return result

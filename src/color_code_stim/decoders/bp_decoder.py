@@ -11,7 +11,6 @@ import numpy as np
 
 from .base import BaseDecoder
 from ..dem_utils.dem_manager import DemManager
-from ..stim_utils import dem_to_parity_check, remove_obs_from_dem
 
 
 class BPDecoder(BaseDecoder):
@@ -26,7 +25,7 @@ class BPDecoder(BaseDecoder):
     Key Features:
     - LDPC belief propagation with configurable iterations
     - Support for both 1D and 2D detector outcome arrays
-    - Optional DEM observable removal for comparative decoding
+    - Excludes logical hypothesis detector rows from comparative BP checks
     - Returns predictions, log-likelihood ratios, and convergence information
     - Graceful handling of missing ldpc dependency
 
@@ -35,7 +34,7 @@ class BPDecoder(BaseDecoder):
     dem_manager : DEMManager
         Manager for detector error models and matrices
     comparative_decoding : bool
-        Whether to remove observables from DEM before decoding
+        Whether to exclude logical hypothesis detectors from BP checks
     _cached_inputs : dict or None
         Cached parity check matrix and probabilities for efficiency
     """
@@ -121,13 +120,28 @@ class BPDecoder(BaseDecoder):
                 self._cached_inputs = {"H": H, "p": p}
 
         detector_outcomes = np.asarray(detector_outcomes)
+        if detector_outcomes.ndim not in (1, 2):
+            raise ValueError("detector_outcomes must be 1D or 2D")
+        allowed_widths = {H.shape[0]}
+        if self.comparative_decoding:
+            allowed_widths.add(self.dem_manager.circuit.num_detectors)
+        if detector_outcomes.shape[-1] not in allowed_widths:
+            raise ValueError("detector_outcomes must match the BP checks or circuit detectors")
+        if detector_outcomes.ndim == 2 and len(detector_outcomes) == 0:
+            return (np.empty((0, len(p)), dtype=np.uint8),
+                    np.empty((0, len(p)), dtype=float), np.empty(0, dtype=bool))
 
         # Filter detector outcomes to match the DEM dimensions when observables are removed
-        if self.comparative_decoding:
+        if self.comparative_decoding and self.dem_manager.circuit.num_observables:
             expected_detectors = H.shape[0]
             if detector_outcomes.shape[-1] != expected_detectors:
                 # Truncate to match the number of detectors in the filtered DEM
                 detector_outcomes = detector_outcomes[..., :expected_detectors]
+
+        if len(p) == 0:
+            shape = detector_outcomes.shape[:-1]
+            return (np.zeros(shape + (0,),dtype=np.uint8), np.zeros(shape + (0,),dtype=float),
+                    ~np.any(detector_outcomes,axis=-1))
 
         # Filter kwargs to only include valid BpDecoder parameters
         bp_kwargs = {
@@ -138,7 +152,7 @@ class BPDecoder(BaseDecoder):
 
         if detector_outcomes.ndim == 1:
             # Single sample decoding
-            bpd = BpDecoder(H, error_channel=p, max_iter=max_iter, **bp_kwargs)
+            bpd = BpDecoder(H, error_channel=p, max_iter=max_iter, input_vector_type="syndrome", **bp_kwargs)
             pred = bpd.decode(detector_outcomes)
             llrs = bpd.log_prob_ratios
             converge = bpd.converge
@@ -150,7 +164,7 @@ class BPDecoder(BaseDecoder):
             converge = []
 
             for det_sng in detector_outcomes:
-                bpd = BpDecoder(H, error_channel=p, max_iter=max_iter, **bp_kwargs)
+                bpd = BpDecoder(H, error_channel=p, max_iter=max_iter, input_vector_type="syndrome", **bp_kwargs)
                 pred.append(bpd.decode(det_sng))
                 llrs.append(bpd.log_prob_ratios)
                 converge.append(bpd.converge)
@@ -175,16 +189,11 @@ class BPDecoder(BaseDecoder):
         tuple
             (H, p) where H is the parity check matrix and p is the error probabilities
         """
-        dem = self.dem_manager.dem_xz
-
-        if self.comparative_decoding:
-            # Remove observables from DEM for comparative decoding
-            dem = remove_obs_from_dem(dem)
-
-        # Convert DEM to parity check matrix and probabilities
-        H, _, p = dem_to_parity_check(dem)
-
-        # Convert H to uint8 as required by ldpc.BpDecoder
+        projection = self.dem_manager.global_projection
+        H, p = projection.H, projection.priors
+        if self.comparative_decoding and self.dem_manager.circuit.num_observables:
+            # Logical hypothesis detectors are unknown outcomes, never BP checks.
+            H = H[:-self.dem_manager.circuit.num_observables]
         H = H.astype("uint8")
 
         return H, p

@@ -56,9 +56,17 @@ arrays. `check_validity=True` checks the winning correction without retaining
 all candidates for diagnostics.
 
 `metrics=None` retains the old API; even `metrics=()` explicitly requests the
-tuple form with an empty metric dictionary. Metrics cannot be combined with
-`full_output=True`, `return_candidate_data=True`, BP/custom priors, erasure
+tuple form with an empty metric dictionary. Ordinary metrics cannot be combined with
+`full_output=True`, `return_candidate_data=True`, custom priors, erasure
 predecoding or cultivation postselection. Unsupported names/modes and
 invalid observable shapes fail explicitly. Empty batches return empty scalar
 arrays without advancing perturbation state. Native absolute shot offsets
 and advancing RNG/save/load behavior remain unchanged.
+
+With [`bp_predecoding=True`](global_bp_predecoding.md), `bp_converged` is
+returned as a boolean array `(shots,)` in addition to requested metrics.
+Concatenated metrics, including `logical_error`, are masked arrays whose mask
+equals `bp_converged`. Every shot still receives a hard prediction. BP mode
+can combine metrics with full output to verify per-shot diagnostics. Paired
+color-correlated baselines are recomputed in the same posterior DEM, rather
+than supplied from the original circuit prior.

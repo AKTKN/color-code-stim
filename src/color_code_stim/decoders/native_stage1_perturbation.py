@@ -27,6 +27,7 @@ class NativeStage1Ensemble:
     def __init__(self, manager, size, alpha, seed, cache):
         self.size, self.alpha, self.seed = size, alpha, resolve_native_seed(seed)
         self.shot_position = 0
+        self.clip_probabilities = manager.bp_prior_clipping
         self.matchings, self.structures = {}, {}
         for stream, color in enumerate(COLORS):
             base = manager.dems_decomposed[color]
@@ -37,6 +38,7 @@ class NativeStage1Ensemble:
                 structure.matrix, weights=np.log((1-p)/p), error_probabilities=p,
                 apply_perturbation=True, alpha=alpha, seed=self.seed,
                 ensemble_size=size, stream_id=stream,
+                clip_perturbed_probabilities=manager.bp_prior_clipping,
             )
 
     def start(self, offset, count):
@@ -57,7 +59,7 @@ class NativeStage1Ensemble:
             self.shot_position = max(self.shot_position, offset + count)
 
     def get_state(self):
-        return dict(kind='native_stage1', scheme_version=1, seed=self.seed,
+        return dict(kind='native_stage1', scheme_version=2 if self.clip_probabilities else 1, seed=self.seed,
                     ensemble_size=self.size, alpha=self.alpha, shot_position=self.shot_position)
 
     def set_state(self, state):

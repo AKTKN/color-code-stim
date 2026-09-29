@@ -182,7 +182,7 @@ class ColorCorrelatedPriorReweighter:
         self._builder = OriginalDemProbabilityBuilder(dem_manager)
         self._base_q = self._builder.base_q
         self.b = float(b)
-        self._raised_q = np.minimum(self._base_q ** (1 / self.b), 1 - MATCHING_EPS)
+        self._raised_q = np.minimum(self._base_q ** (1 / self.b), .5 if dem_manager.bp_prior_clipping else 1 - MATCHING_EPS)
         self._cache_size = cache_size
         self._cache = OrderedDict()
         self._stage1 = {}
