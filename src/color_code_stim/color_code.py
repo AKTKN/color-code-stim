@@ -125,6 +125,7 @@ class ColorCode:
         _decompose_dem: bool = True,
         _benchmarking: bool = False,
         use_original_prior_for_stage2: bool = False,
+        stage1_perturbation: bool = False,
     ):
         """
         Class for constructing a color code circuit and simulating the
@@ -239,11 +240,26 @@ class ColorCode:
             'original_dem' scores mapped stage-2 corrections with the unchanged
             probabilities of the pre-decomposition X/Z DEM. Color-correlated
             decoding requires 'original_dem'; other modes default to 'stage2'.
+        stage1_perturbation : bool, default False
+            Opt into native independent stage-1-edge ensembles. Automatically
+            enables prior perturbation and original-prior stage 2. Requires the
+            modified PyMatching backend; retains the configured final scoring.
         use_original_prior_for_stage2 : bool, default False
             In prior perturbation decoding, use the unmodified X/Z DEM color
             decomposition for stage 2 while retaining perturbed stage-1 priors.
             False uses the perturbed decomposition in both matching stages.
             Final candidate selection always uses the unchanged base prior.
+        enable_prior_perturbation : bool, default False
+            Resample nonbaseline common-X/Z-DEM ensemble members independently
+            for every shot, sharing each draw across colors and logical classes.
+        perturbation_ensemble_size : int, default 1
+            Number of members including the unchanged baseline member 0.
+        perturbation_alpha : float, default 0.0
+            Perturb q by clip(q * (1 + alpha * Uniform(-1, 1)), eps, 1-eps).
+            Zero retains the exact baseline probabilities.
+        perturbation_seed : int or None, default None
+            Initialize the advancing shot/member/source random stream. The
+            stream is invariant to batch partition and persists through save/load.
         exclude_non_essential_pauli_detectors : bool, default False
             If True and `temp_bdry_type` is not "Y", detectors with the Pauli type
             different from the temporal boundary type (e.g., X-type detectors for
@@ -423,6 +439,10 @@ class ColorCode:
             raise ValueError("color_correlated_b must be positive and finite")
         self.color_correlated_b = float(color_correlated_b)
         self.enable_cross_color_relifting = enable_cross_color_relifting
+        if type(stage1_perturbation) is not bool:
+            raise ValueError("stage1_perturbation must be boolean")
+        self.stage1_perturbation = stage1_perturbation
+        enable_prior_perturbation = enable_prior_perturbation or stage1_perturbation
         self.enable_prior_perturbation = enable_prior_perturbation
         if not isinstance(perturbation_ensemble_size, int) or perturbation_ensemble_size < 1:
             raise ValueError("perturbation_ensemble_size must be >= 1")
@@ -430,10 +450,13 @@ class ColorCode:
             raise ValueError("perturbation_alpha must be between 0 and 1")
         self.perturbation_ensemble_size = perturbation_ensemble_size
         self.perturbation_alpha = perturbation_alpha
+        if stage1_perturbation:
+            from .decoders.native_stage1_perturbation import resolve_native_seed
+            perturbation_seed = resolve_native_seed(perturbation_seed)
         self.perturbation_seed = perturbation_seed
         if type(use_original_prior_for_stage2) is not bool:
             raise ValueError("use_original_prior_for_stage2 must be boolean")
-        self.use_original_prior_for_stage2 = use_original_prior_for_stage2
+        self.use_original_prior_for_stage2 = use_original_prior_for_stage2 or stage1_perturbation
         if enable_prior_perturbation and (enable_cross_color_relifting or enable_colorcorrelated_decoding):
             raise NotImplementedError("Prior perturbation cannot be combined with cross-color relifting or color-correlated decoding")
         if enable_cross_color_relifting and enable_colorcorrelated_decoding:
@@ -519,6 +542,8 @@ class ColorCode:
             if self._generate_dem:
                 self._dem_manager = DemManager(
                     circuit=self.circuit,
+                    temp_bdry_type=self.temp_bdry_type,
+                    lazy_dem=True,
                     swim_data_only=(self.circuit_type == "tri" and self.rounds == 1
                         and not self.comparative_decoding and self.temp_bdry_type == "Z"
                         and 0 < self.noise_model["bitflip"] < 0.5
@@ -590,12 +615,27 @@ class ColorCode:
                 color_correlated_b=self.color_correlated_b,
                 enable_cross_color_relifting=self.enable_cross_color_relifting,
                 enable_prior_perturbation=self.enable_prior_perturbation,
+                stage1_perturbation=self.stage1_perturbation,
                 perturbation_ensemble_size=self.perturbation_ensemble_size,
                 perturbation_alpha=self.perturbation_alpha,
                 perturbation_seed=self.perturbation_seed,
                 use_original_prior_for_stage2=self.use_original_prior_for_stage2,
                 color_correlated_weight_basis=self.color_correlated_weight_basis,
             )
+            state = getattr(self, '_prior_perturbation_state', None)
+            if state is not None and self.enable_prior_perturbation:
+                from .decoders.prior_perturbation import PriorPerturbationEnsemble
+                decoder = self._concat_matching_decoder
+                if self.stage1_perturbation:
+                    from .decoders.native_stage1_perturbation import NativeStage1Ensemble
+                    decoder._perturbation_ensemble = NativeStage1Ensemble(
+                        self.dem_manager, self.perturbation_ensemble_size,
+                        self.perturbation_alpha, self.perturbation_seed, decoder._matching_cache)
+                else:
+                    decoder._perturbation_ensemble = PriorPerturbationEnsemble(
+                        self.dem_manager, self.perturbation_ensemble_size,
+                        self.perturbation_alpha, self.perturbation_seed)
+                decoder._perturbation_ensemble.set_state(state)
         return self._concat_matching_decoder
 
     @property
@@ -615,7 +655,16 @@ class ColorCode:
             self._belief_concat_matching_decoder = BeliefConcatMatchingDecoder(
                 dem_manager=self.dem_manager,
                 bp_cache_inputs=True,
+                decoder_options={name: getattr(self, name) for name in (
+                    "enable_colorcorrelated_decoding", "color_correlated_b",
+                    "enable_cross_color_relifting", "enable_prior_perturbation",
+                    "stage1_perturbation", "perturbation_ensemble_size",
+                    "perturbation_alpha", "perturbation_seed",
+                    "use_original_prior_for_stage2", "color_correlated_weight_basis")},
             )
+            state = getattr(self, "_bp_prior_state", None)
+            if state is not None:
+                self._belief_concat_matching_decoder.set_state(state)
         return self._belief_concat_matching_decoder
 
     @property
@@ -922,8 +971,9 @@ class ColorCode:
         """
         Decode detector outcomes using belief propagation.
 
-        This method delegates to the BPDecoder while maintaining backward compatibility
-        with the _bp_inputs caching mechanism for integration with pre-decoding.
+        BP checks and returned error patterns use the original unsplit global
+        DEM mechanism space. Comparative logical hypothesis rows are excluded
+        from BP checks; global observable labels and mechanism columns remain.
 
         Parameters
         ----------
@@ -943,16 +993,6 @@ class ColorCode:
         converge : bool
             Whether the belief propagation algorithm converged within max_iter iterations.
         """
-        # Update _bp_inputs cache for compatibility with pre-decoding integration
-        if not self._bp_inputs:
-            if self.comparative_decoding:
-                dem = remove_obs_from_dem(self.dem_xz)
-            else:
-                dem = self.dem_xz
-            H, p = dem_to_parity_check(dem)
-            self._bp_inputs["H"] = H
-            self._bp_inputs["p"] = p
-
         # Delegate to BP decoder
         return self.bp_decoder.decode(detector_outcomes, max_iter=max_iter, **kwargs)
 
@@ -970,6 +1010,12 @@ class ColorCode:
         verbose: bool = False,
         compute_swim_distance: bool = False,
         return_candidate_data: bool = False,
+        perturbation_shot_offset: int | None = None,
+        bp_shot_offset: int | None = None,
+        metrics: Sequence[str] | None = None,
+        actual_observables: np.ndarray | None = None,
+        baseline_predictions: np.ndarray | None = None,
+        candidate_scorer=None,
     ) -> np.ndarray | Tuple[np.ndarray, dict]:
         """
         Decode detector outcomes using concatenated MWPM decoding.
@@ -993,7 +1039,11 @@ class ColorCode:
             combinations (i.e., logical classes) will be tried and the one with minimum
             weight will be selected.
         bp_predecoding : bool, default False
-            Whether to use belief propagation as a pre-decoding step.
+            Run BP on the original global DEM. Converged shots return its
+            observable prediction; other shots use posterior-derived -log(p)
+            weights only for stage 1. Stage 2 and final candidate selection use
+            the original physical priors, overriding the ordinary stage-2 and
+            comparison-basis options. See docs/global_bp_predecoding.md.
         bp_prms : dict, default None
             Parameters for the belief propagation decoder.
         erasure_matcher_predecoding : bool, default False
@@ -1017,6 +1067,13 @@ class ColorCode:
             Include generated stage-1 hypotheses, mapped corrections and
             candidate validity in full_output for an external circuit-level
             soft-output scorer. Hard selection is unchanged.
+        metrics : sequence of str, optional
+            With full_output=False, return (predictions, metrics_dict) containing
+            only the requested per-shot scalar arrays. Error metrics require
+            actual_observables. Color-correlated baseline error metrics also
+            require ordinary baseline_predictions. candidate_scorer optionally
+            supplies unchanged-prior circuit SWIM values during generation.
+            See docs/experiment_metrics.md for supported names and scope.
 
         Returns
         -------
@@ -1025,17 +1082,21 @@ class ColorCode:
             2D if otherwise. obs_preds[i] or obs_preds[i,j] is True if and only
             if the j-th observable (j=0 when 1D) of the i-th sample is
             predicted to be -1.
-        extra_outputs : dict, only when full_output is True
-            Dictionary containing additional decoding outputs.
+        extra_outputs : dict, when full_output is True or metrics is not None
+            Diagnostics for full_output; otherwise only the requested per-shot
+            metric arrays. No candidate diagnostics are included in metrics mode.
+
+        Native mode accepts perturbation_shot_offset=None to advance its cursor,
+        or an absolute shot index to replay identical colour-specific priors.
+        Other modes reject this option.
+
+        BP also accepts bp_shot_offset for absolute physical-shot indexing,
+        retaining skipped shots in the perturbation stream. BP metrics always
+        include bp_converged; concatenated metrics are masked on those shots.
+        BP full_output adds concat_outputs with one diagnostic record per
+        fallback shot and None for skipped shots. With BP, metrics and
+        full_output can be combined for diagnostic verification.
         """
-        if self.enable_colorcorrelated_decoding and bp_predecoding:
-            raise NotImplementedError("Color-correlated decoding with BP predecoding is not supported")
-        if self.enable_cross_color_relifting and bp_predecoding:
-            raise NotImplementedError("Cross-color relifting with BP predecoding is unsupported")
-        if self.enable_prior_perturbation and bp_predecoding:
-            raise NotImplementedError("Prior perturbation with BP predecoding is unsupported")
-        if compute_swim_distance and bp_predecoding:
-            raise NotImplementedError("Swim output is not validated for BP predecoding")
         # Handle BP pre-decoding by delegating to BeliefConcatMatchingDecoder
         if bp_predecoding:
             return self.belief_concat_matching_decoder.decode(
@@ -1043,6 +1104,12 @@ class ColorCode:
                 colors=colors,
                 logical_value=logical_value,
                 bp_prms=bp_prms,
+                metrics=metrics, actual_observables=actual_observables,
+                candidate_scorer=candidate_scorer,
+                compute_swim_distance=compute_swim_distance,
+                return_candidate_data=return_candidate_data,
+                perturbation_shot_offset=perturbation_shot_offset,
+                bp_shot_offset=bp_shot_offset,
                 erasure_matcher_predecoding=erasure_matcher_predecoding,
                 partial_correction_by_predecoding=partial_correction_by_predecoding,
                 full_output=full_output,
@@ -1050,10 +1117,18 @@ class ColorCode:
                 verbose=verbose,
             )
 
+        if bp_shot_offset is not None:
+            raise ValueError("bp_shot_offset requires bp_predecoding=True")
+
         # Delegate to ConcatMatchingDecoder for standard decoding
         return self.concat_matching_decoder.decode(
+            metrics=metrics,
+            actual_observables=actual_observables,
+            baseline_predictions=baseline_predictions,
+            candidate_scorer=candidate_scorer,
             compute_swim_distance=compute_swim_distance,
             return_candidate_data=return_candidate_data,
+            perturbation_shot_offset=perturbation_shot_offset,
             detector_outcomes=detector_outcomes,
             colors=colors,
             logical_value=logical_value,
@@ -1249,6 +1324,12 @@ class ColorCode:
             The file path where the object should be saved.
         """
         data = self.__dict__.copy()
+        bp = self._belief_concat_matching_decoder
+        if bp is not None:
+            data["_bp_prior_state"] = bp.get_state()
+        decoder = self._concat_matching_decoder
+        if decoder is not None and decoder._perturbation_ensemble is not None:
+            data['_prior_perturbation_state'] = decoder._perturbation_ensemble.get_state()
 
         # Known non-picklable attributes based on modular architecture
         known_non_picklable = [
@@ -1344,11 +1425,12 @@ class ColorCode:
         )
         instance.color_correlated_b = data.get("color_correlated_b", 1.0)
         instance.enable_cross_color_relifting = data.get("enable_cross_color_relifting", False)
-        instance.enable_prior_perturbation = data.get("enable_prior_perturbation", False)
+        instance.stage1_perturbation = data.get("stage1_perturbation", False)
+        instance.enable_prior_perturbation = data.get("enable_prior_perturbation", False) or instance.stage1_perturbation
         instance.perturbation_ensemble_size = data.get("perturbation_ensemble_size", 1)
         instance.perturbation_alpha = data.get("perturbation_alpha", 0.0)
         instance.perturbation_seed = data.get("perturbation_seed", None)
-        instance.use_original_prior_for_stage2 = data.get("use_original_prior_for_stage2", False)
+        instance.use_original_prior_for_stage2 = data.get("use_original_prior_for_stage2", False) or instance.stage1_perturbation
         instance.color_correlated_weight_basis = data.get(
             "color_correlated_weight_basis",
             "original_dem" if instance.enable_colorcorrelated_decoding else "stage2",

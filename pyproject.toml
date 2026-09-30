@@ -24,6 +24,9 @@ dynamic = ["dependencies"]
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
+[project.optional-dependencies]
+bp = ["ldpc>=2,<3"]
+
 [project.urls]
 "Homepage" = "https://github.com/seokhyung-lee/color-code-stim"
 "Bug Tracker" = "https://github.com/seokhyung-lee/color-code-stim/issues"

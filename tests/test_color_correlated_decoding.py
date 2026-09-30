@@ -344,8 +344,10 @@ def test_unsupported_options_and_colorcode_persistence(tmp_path):
     assert np.isfinite(scored["selected_swim_distance"]).all()
     assert np.all(scored["class_min_swim_distance"] <=
                   scored["selected_swim_distance"] + 1e-12)
-    with pytest.raises(NotImplementedError, match="BP"):
-        cc.decode(shots, bp_predecoding=True)
+    bp_prediction, bp_extra = cc.decode(shots, bp_predecoding=True, metrics=["weights"])
+    assert bp_prediction.shape == (len(shots),)
+    assert bp_extra["bp_converged"].dtype == bool
+    np.testing.assert_array_equal(np.ma.getmaskarray(bp_extra["weights"]), bp_extra["bp_converged"])
     path = tmp_path / "color_code.pkl"
     cc.save(str(path))
     restored = ColorCode.load(str(path))

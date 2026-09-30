@@ -1,6 +1,27 @@
 ## (Proceeding) Soft-output integration.
 
 # color-code-stim
+
+[`bp_predecoding=True`](docs/global_bp_predecoding.md) runs BP on the unsplit
+global DEM. It returns converged BP predictions directly. For other shots,
+it aggregates raw posteriors into X/Z DEM mechanisms using independent XOR,
+assigns `-log(p)` weights, then passes effective probabilities `p/(1+p)` to
+stage-1 color decomposition. **Stage 2 and final color/logical-class selection
+use the original pre-BP physical prior** (global-BP version 4). This applies
+to ordinary and advanced candidate strategies, including native perturbation.
+`bp_converged` identifies skipped concatenated decoding; its metrics are
+masked on those shots. Install the optional dependency with
+`pip install 'color-code-stim[bp]'`.
+
+For experiment statistics, use [`decode(..., metrics=(...))`](docs/experiment_metrics.md)
+with the default `full_output=False`. It returns only requested `(shots,)`
+arrays, while preserving matching, selection, ties and RNG state. Existing
+`full_output=True` remains available for candidate diagnostics.
+
+The opt-in [`stage1_perturbation`](docs/native_stage1_perturbation.md) workflow
+generates stage-1 ensembles inside the modified PyMatching backend and reuses
+original-prior stage-2 graphs. Its default is False, retaining original-DEM
+perturbation behavior.
 Python package for simulating &amp; decoding 2D color code circuits via the [concatenated MWPM decoder](https://quantum-journal.org/papers/q-2025-01-27-1609).
 
 **Note**: _The [previous version](https://github.com/seokhyung-lee/color-code-stim/tree/53b60e9efb5a691ccdc0a8d1ecab2fb7b76cf301) of this package (used in [our paper](https://quantum-journal.org/papers/q-2025-01-27-1609/)) implemented the bit‑flip noise model incorrectly, leading to an overestimation of the logical failure rate. In that version, each qubit was subjected to bit‑flip noise twice, both before and after the syndrome extraction (see lines 612 and 656 of [`color_code_stim.py`](https://github.com/seokhyung-lee/color-code-stim/blob/53b60e9efb5a691ccdc0a8d1ecab2fb7b76cf301/color_code_stim.py)). This has been corrected in the latest version, where **the estimated bit‑flip noise threshold has been improved from 8.2% (presented in our paper) to 8.6%**, and the logical failure rate has been roughly halved. The circuit‑level results, which form the main focus of the paper, remain unaffected._
@@ -98,6 +119,26 @@ perturbed prior while stage 2 uses the original X/Z DEM's color decomposition,
 including its original column order. Final candidate comparison uses the
 unchanged base prior selected by `color_correlated_weight_basis` in both modes;
 member 0 is unchanged. This option persists through `ColorCode.save/load`.
+Members 1 through M-1 are independently resampled for **every shot**, on the
+common original X/Z DEM. Each shot/member draw is shared by all three colors
+and all comparative logical hypotheses. A decoder-owned RNG advances in
+shot/member/source order across calls; a seed reproduces the same ordered shot
+stream regardless of batch partition or `full_output`. Repeating a call on an
+already advanced decoder consumes fresh draws. Save/load resumes this stream;
+legacy files without stream state start from their configured seed. M=1 and
+alpha=0 consume no random numbers, while still advancing the shot position.
+Older fixed-ensemble runs have different sampling semantics.
+
+The six ordinary weighted matchings and immutable check filtering are reused
+across calls. Dynamic weighted matchings use an exact graph/prior cache bounded
+at 32 entries, plus current-shot references for reuse across logical hypotheses.
+Perturbation uses cached symbolic source maps, preserving the exact probability
+products and probability-dependent stage-2 column sorting. New per-shot weights
+still require new weighted matchings. With original-prior stage 2, all members
+share the three ordinary stage-2 matchings. Matching caches are rebuilt lazily
+after loading. Hard-output decoding avoids retaining full candidate correction
+and diagnostic tensors; original-DEM correction mapping and scoring still run.
+
 Color-correlated decoding retains 12
 slots: its baseline requires six calls, with zero, three, or nine guided
 reruns for baseline equality classes 0, 1, or 2 respectively (six, twelve,
@@ -108,8 +149,9 @@ Both use the same exact equality rule and the first equal representative in
 weights are diagnostics.
 
 This option requires all three colors and unit-multiplicity source provenance.
-It currently cannot be combined with BP/custom DEM priors or matching-growth
-swim output. The default remains the ordinary three-candidate decoder.
+Custom DEM priors remain unsupported. BP is supported through the posterior
+DEM view described above; supported SWIM output uses that view's base priors.
+The default remains the ordinary three-candidate decoder.
 
 ## Project Structure
 
