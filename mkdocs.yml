@@ -41,6 +41,7 @@ markdown_extensions:
 # Navigation
 nav:
   - Home: index.md
+  - Monochromatic path gap: monochromatic_path_gap.md
   - API Reference:
     - ColorCode: api/color_code.md
     - NoiseModel: api/noise_model.md
